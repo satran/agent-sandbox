@@ -8,12 +8,12 @@ disabled without touching the rest of your machine.
 
 ```sh
 # put the script on your PATH (it resolves its own location, so a symlink is fine)
-ln -s "$PWD/bin/sandbox" ~/.local/bin/sandbox
+ln -s "$PWD/bin/sb" ~/.local/bin/sb
 
 cd ~/src/myproject
-sandbox claude            # build images if needed, start container, attach
+sb claude       # build images if needed, start container, attach
 # ... work ...  C-b d to detach
-sandbox claude            # re-attach to the same session
+sb claude       # re-attach to the same session
 ```
 
 Requirements on the host: `bash`, `docker`, `shasum`.
@@ -21,8 +21,8 @@ Requirements on the host: `bash`, `docker`, `shasum`.
 ## Usage
 
 ```
-usage: sandbox <agent> [path] [options] [-- agent-args...]
-       sandbox list
+usage: sb <agent> [path] [options] [-- agent-args...]
+       sb list
 
 options:
   --rebuild    rebuild the agent image (implies --recreate)
@@ -33,13 +33,13 @@ options:
 
 - `path` defaults to the current directory.
 - Anything after `--` is appended to the agent command, e.g.
-  `sandbox claude -- --resume`. It only applies when the tmux session is first
+  `sb claude -- --resume`. It only applies when the tmux session is first
   created; if the session is already running, the args are ignored with a warning.
-- `sandbox list` shows all sandbox containers with their status and project path.
+- `sb list` shows all sandbox containers with their status and project path.
 
 ## How it works
 
-For `sandbox <agent> <path>`:
+For `sb <agent> <path>`:
 
 1. **Config.** Sources `containers/<agent>/sandbox.conf` (see
    [Adding an agent](#adding-an-agent)).
@@ -67,7 +67,7 @@ For `sandbox <agent> <path>`:
 ## Layout
 
 ```
-bin/sandbox                  the launcher
+bin/sb                       the launcher
 containers/base/             shared base image (sandbox-base)
 containers/<agent>/          Dockerfile (FROM sandbox-base) + sandbox.conf
 containers/docker-compose.yml  older compose-based setup (mounts ../../src)
@@ -86,7 +86,7 @@ Agent Dockerfiles only add the agent itself.
 
 ### Agents
 
-| agent      | `sandbox.conf` | runnable with `bin/sandbox` |
+| agent      | `sandbox.conf` | runnable with `bin/sb` |
 |------------|----------------|-----------------------------|
 | `claude`   | yes            | yes                         |
 | `gemini`   | yes            | yes                         |
@@ -111,7 +111,7 @@ Agent Dockerfiles only add the agent itself.
    # USER satran
    ```
 
-2. Create `containers/<name>/sandbox.conf`. It is bash, sourced by `bin/sandbox`:
+2. Create `containers/<name>/sandbox.conf`. It is bash, sourced by `bin/sb`:
 
    ```bash
    # host paths are relative to the repo root; created automatically
@@ -120,11 +120,11 @@ Agent Dockerfiles only add the agent itself.
    AGENT_CMD=(<name> --some-flag)   # required
    ```
 
-3. Run `sandbox <name> --rebuild`.
+3. Run `sb <name> --rebuild`.
 
 ## Known issues
 
-- The container user `satran` is hard-coded in `bin/sandbox` (`CUSER`) and in
+- The container user `satran` is hard-coded in `bin/sb` (`CUSER`) and in
   `containers/base/Dockerfile`.
 - Security: the agents run with permission checks disabled and the container
   user has passwordless sudo, so the container is the only boundary. The

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# sandbox - run a coding agent inside a per-project docker container.
+# sb - run a coding agent inside a per-project docker container.
 #
-#   sandbox <agent> [path] [options] [-- agent-args...]
-#   sandbox list
+#   sb <agent> [path] [options] [-- agent-args...]
+#   sb list
 #
 # Each (agent, project) pair gets its own long-lived container. The project is
 # mounted at the same path relative to $HOME inside the container, and you are
 # attached to a tmux session running the agent. Detach with C-b d; running
-# sandbox again re-attaches.
+# sb again re-attaches.
 #
 # Agents are defined by containers/<agent>/{Dockerfile,sandbox.conf}.
 
@@ -22,8 +22,8 @@ CPATH="$CHOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 
 usage() {
 	cat <<EOF
-usage: sandbox <agent> [path] [options] [-- agent-args...]
-       sandbox list
+usage: sb <agent> [path] [options] [-- agent-args...]
+       sb list
 
 options:
   --rebuild    rebuild the agent image (implies --recreate)
@@ -35,7 +35,7 @@ agents: $(ls "$CONTAINERS"/*/sandbox.conf 2>/dev/null | xargs -n1 dirname | xarg
 EOF
 }
 
-die() { echo "sandbox: $*" >&2; exit 1; }
+die() { echo "sb: $*" >&2; exit 1; }
 
 if [[ $# -eq 0 ]]; then usage; exit 1; fi
 
@@ -103,12 +103,12 @@ if [[ $STOP -eq 1 ]]; then
 fi
 
 if [[ $RECREATE -eq 1 && -n "$(container_state)" ]]; then
-	echo "sandbox: removing $NAME" >&2
+	echo "sb: removing $NAME" >&2
 	docker rm -f "$NAME" >/dev/null
 fi
 
 if [[ $REBUILD -eq 1 ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-	echo "sandbox: building $IMAGE" >&2
+	echo "sb: building $IMAGE" >&2
 	docker build -t "$IMAGE" "$AGENT_DIR"
 fi
 
@@ -142,13 +142,13 @@ cmd="$(printf '%q ' "${AGENT_CMD[@]}" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"})"
 docker exec -it "$NAME" bash -c '
 	set -e
 	if ! command -v tmux >/dev/null; then
-		echo "sandbox: tmux is not installed in this image" >&2; exit 1
+		echo "sb: tmux is not installed in this image" >&2; exit 1
 	fi
 	if ! tmux has-session -t sandbox 2>/dev/null; then
 		tmux new-session -d -s sandbox -n "$1" -c "$2" "$3; exec bash"
 		tmux new-window -d -t sandbox -n shell -c "$2"
 	elif [ -n "$4" ]; then
-		echo "sandbox: session already running, ignoring agent args" >&2
+		echo "sb: session already running, ignoring agent args" >&2
 	fi
 	exec tmux attach -t sandbox
 ' _ "$AGENT" "$CPROJECT" "$cmd" "${AGENT_ARGS[*]-}"
