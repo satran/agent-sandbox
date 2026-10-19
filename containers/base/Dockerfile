@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
 	nodejs \
 	npm \
 	git \
+	ranger \
 	sudo
 
 # Set up a symbolic link for python (so 'python' works instead of 'python3')
