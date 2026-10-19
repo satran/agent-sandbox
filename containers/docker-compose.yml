@@ -1,4 +1,11 @@
+# The agent images are FROM sandbox-base; build it first:
+#   docker compose build base
 services:
+  base:
+    build: ./base
+    image: sandbox-base
+    profiles: [build] # image only, never started by `docker compose up`
+
   gemini:
     build: ./gemini
     container_name: gemini

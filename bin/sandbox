@@ -119,7 +119,9 @@ case "$(container_state)" in
 			-d --name "$NAME" --hostname "$AGENT"
 			--label sandbox.agent="$AGENT" --label sandbox.project="$PROJECT"
 			-e PATH="$CPATH" -e COLORTERM=truecolor
+			-e SANDBOX_HOST="$(hostname -s)" -e SANDBOX_PROJECT="${PROJECT/#"$HOST_HOME"/\~}"
 			-v "$PROJECT:$CPROJECT" -w "$CPROJECT"
+			-v "$CONTAINERS/tmux.conf:$CHOME/.tmux.conf:ro"
 		)
 		for m in ${CONFIG_MOUNTS[@]+"${CONFIG_MOUNTS[@]}"}; do
 			host="$ROOT/${m%%:*}"

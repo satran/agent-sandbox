@@ -6,6 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
 	curl \
 	vim \
+	emacs-nox \
 	tmux \
 	fish \
 	python3 \
@@ -13,13 +14,20 @@ RUN apt-get update && apt-get install -y \
 	python3-venv \
 	nodejs \
 	npm \
-	git
+	git \
+	sudo
+
+# Set up a symbolic link for python (so 'python' works instead of 'python3')
+RUN ln -s /usr/bin/python3 /usr/bin/python
 
 # Setup local user
-RUN apt-get install -y sudo
 RUN useradd -ms /bin/bash satran
 RUN usermod -G sudo satran
 RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
+ENV PATH="/home/satran/.local/bin:$PATH"
+
 WORKDIR /home/satran
 USER satran
+
+CMD ["/bin/bash"]
