@@ -1,0 +1,37 @@
+services:
+  gemini:
+    build: ./gemini
+    container_name: gemini
+    volumes:
+      - ../home/gemini/.gemini:/home/satran/.gemini
+      - ../../src:/home/satran/src
+    stdin_open: true # allows interactive terminal
+    tty: true        # allows interactive terminal
+    hostname: gemini
+
+  claude:
+    build: ./claude
+    container_name: claude
+    volumes:
+      - ../home/claude/.claude:/home/satran/.claude
+      - ../../src:/home/satran/src
+    stdin_open: true # allows interactive terminal
+    tty: true        # allows interactive terminal
+    hostname: claude
+
+  omp:
+    build: ./omp
+    container_name: omp
+    volumes:
+      - ../home/omp/:/home/satran/.omp
+      - ../../src:/home/satran/src
+    stdin_open: true # allows interactive terminal
+    tty: true        # allows interactive terminal
+    hostname: omp
+
+  sandbox:
+    build: ./sandbox
+    container_name: sandbox
+    stdin_open: true # allows interactive terminal
+    tty: true        # allows interactive terminal
+    hostname: sandbox

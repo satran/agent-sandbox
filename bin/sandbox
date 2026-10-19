@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+#
+# sandbox - run a coding agent inside a per-project docker container.
+#
+#   sandbox <agent> [path] [options] [-- agent-args...]
+#   sandbox list
+#
+# Each (agent, project) pair gets its own long-lived container. The project is
+# mounted at the same path relative to $HOME inside the container, and you are
+# attached to a tmux session running the agent. Detach with C-b d; running
+# sandbox again re-attaches.
+#
+# Agents are defined by containers/<agent>/{Dockerfile,sandbox.conf}.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CONTAINERS="$ROOT/containers"
+CUSER=satran
+CHOME="/home/$CUSER"
+CPATH="$CHOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+usage() {
+	cat <<EOF
+usage: sandbox <agent> [path] [options] [-- agent-args...]
+       sandbox list
+
+options:
+  --rebuild    rebuild the agent image (implies --recreate)
+  --recreate   remove this project's container and start a fresh one
+  --stop       stop this project's container
+  -h, --help   show this help
+
+agents: $(ls "$CONTAINERS"/*/sandbox.conf 2>/dev/null | xargs -n1 dirname | xargs -n1 basename | tr '\n' ' ')
+EOF
+}
+
+die() { echo "sandbox: $*" >&2; exit 1; }
+
+if [[ $# -eq 0 ]]; then usage; exit 1; fi
+
+case "$1" in
+	-h|--help) usage; exit 0 ;;
+	list)
+		docker ps -a --filter label=sandbox.agent \
+			--format 'table {{.Names}}\t{{.Status}}\t{{.Label "sandbox.project"}}'
+		exit 0 ;;
+esac
+
+AGENT="$1"; shift
+AGENT_DIR="$CONTAINERS/$AGENT"
+[[ -f "$AGENT_DIR/sandbox.conf" ]] || die "unknown agent '$AGENT' (no $AGENT_DIR/sandbox.conf)"
+
+PROJECT="$PWD"
+REBUILD=0 RECREATE=0 STOP=0
+AGENT_ARGS=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--rebuild) REBUILD=1 RECREATE=1 ;;
+		--recreate) RECREATE=1 ;;
+		--stop) STOP=1 ;;
+		-h|--help) usage; exit 0 ;;
+		--) shift; AGENT_ARGS=("$@"); break ;;
+		-*) die "unknown option $1" ;;
+		*) PROJECT="$1" ;;
+	esac
+	shift
+done
+
+# Per-agent settings. CONFIG_MOUNTS are "host:container" with host relative to
+# the repo root; AGENT_CMD is what runs in the first tmux window.
+CONFIG_MOUNTS=()
+AGENT_ENV=()
+AGENT_CMD=()
+# shellcheck source=/dev/null
+source "$AGENT_DIR/sandbox.conf"
+[[ ${#AGENT_CMD[@]} -gt 0 ]] || die "$AGENT_DIR/sandbox.conf does not set AGENT_CMD"
+
+[[ -d "$PROJECT" ]] || die "no such directory: $PROJECT"
+PROJECT="$(cd "$PROJECT" && pwd -P)"
+HOST_HOME="$(cd "$HOME" && pwd -P)"
+[[ "$PROJECT" != "$HOST_HOME" && "$PROJECT" != / ]] || die "refusing to mount $PROJECT"
+
+# Mirror the path relative to $HOME so agent session history stays stable.
+if [[ "$PROJECT" == "$HOST_HOME"/* ]]; then
+	CPROJECT="$CHOME/${PROJECT#"$HOST_HOME"/}"
+else
+	CPROJECT="$CHOME/ext$PROJECT"
+fi
+
+IMAGE="sandbox-$AGENT"
+SLUG="$(echo "${PROJECT#"$HOST_HOME"/}" | tr -c 'a-zA-Z0-9_.\n' '-' | sed 's/^-*//')"
+HASH="$(printf '%s' "$PROJECT" | shasum | cut -c1-6)"
+NAME="sandbox-$AGENT-$SLUG-$HASH"
+
+container_state() {
+	docker container inspect -f '{{.State.Status}}' "$NAME" 2>/dev/null || true
+}
+
+if [[ $STOP -eq 1 ]]; then
+	[[ -n "$(container_state)" ]] && docker stop "$NAME" >/dev/null
+	exit 0
+fi
+
+if [[ $RECREATE -eq 1 && -n "$(container_state)" ]]; then
+	echo "sandbox: removing $NAME" >&2
+	docker rm -f "$NAME" >/dev/null
+fi
+
+if [[ $REBUILD -eq 1 ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+	echo "sandbox: building $IMAGE" >&2
+	docker build -t "$IMAGE" "$AGENT_DIR"
+fi
+
+case "$(container_state)" in
+	running) ;;
+	"")
+		args=(
+			-d --name "$NAME" --hostname "$AGENT"
+			--label sandbox.agent="$AGENT" --label sandbox.project="$PROJECT"
+			-e PATH="$CPATH" -e COLORTERM=truecolor
+			-v "$PROJECT:$CPROJECT" -w "$CPROJECT"
+		)
+		for m in ${CONFIG_MOUNTS[@]+"${CONFIG_MOUNTS[@]}"}; do
+			host="$ROOT/${m%%:*}"
+			mkdir -p "$host"
+			args+=(-v "$host:${m#*:}")
+		done
+		for e in ${AGENT_ENV[@]+"${AGENT_ENV[@]}"}; do
+			args+=(-e "$e")
+		done
+		[[ -f "$HOME/.gitconfig" ]] && args+=(-v "$HOME/.gitconfig:$CHOME/.gitconfig:ro")
+		docker run "${args[@]}" "$IMAGE" sleep infinity >/dev/null
+		;;
+	*) docker start "$NAME" >/dev/null ;;
+esac
+
+# Build the agent command line; when the agent exits, the window drops to bash.
+cmd="$(printf '%q ' "${AGENT_CMD[@]}" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"})"
+docker exec -it "$NAME" bash -c '
+	set -e
+	if ! command -v tmux >/dev/null; then
+		echo "sandbox: tmux is not installed in this image" >&2; exit 1
+	fi
+	if ! tmux has-session -t sandbox 2>/dev/null; then
+		tmux new-session -d -s sandbox -n "$1" -c "$2" "$3; exec bash"
+		tmux new-window -d -t sandbox -n shell -c "$2"
+	elif [ -n "$4" ]; then
+		echo "sandbox: session already running, ignoring agent args" >&2
+	fi
+	exec tmux attach -t sandbox
+' _ "$AGENT" "$CPROJECT" "$cmd" "${AGENT_ARGS[*]-}"
