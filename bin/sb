@@ -11,6 +11,10 @@
 # sb again re-attaches.
 #
 # Agents are defined by containers/<agent>/{Dockerfile,sandbox.conf}.
+#
+# The agent runs with permission checks off, so the container is the boundary:
+# it has no capabilities, no sudo, no route to the host or LAN, and cannot
+# gain privileges. See "Isolation" in README.md.
 
 set -euo pipefail
 
@@ -19,6 +23,15 @@ CONTAINERS="$ROOT/containers"
 CUSER=agent
 CHOME="/home/$CUSER"
 CPATH="$CHOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Isolated bridge, so sandboxes cannot see each other or use the host resolver.
+NETWORK=sandbox
+SB_DNS="${SB_DNS:-1.1.1.1 8.8.8.8}"
+SB_PIDS="${SB_PIDS:-2048}"
+SB_MEMORY="${SB_MEMORY:-}"
+SB_CPUS="${SB_CPUS:-}"
+SB_BLOCKED_NETS="${SB_BLOCKED_NETS:-}"
+SB_FIREWALL="${SB_FIREWALL:-}"
 
 usage() {
 	cat <<EOF
@@ -30,6 +43,12 @@ options:
   --recreate   remove this project's container and start a fresh one
   --stop       stop this project's container
   -h, --help   show this help
+
+environment (applied when the container is created):
+  SB_MEMORY, SB_CPUS, SB_PIDS   resource limits (default: pids $SB_PIDS)
+  SB_DNS                        resolvers (default: $SB_DNS)
+  SB_BLOCKED_NETS               networks to deny egress to
+  SB_FIREWALL=off               disable the egress firewall (debugging)
 
 agents: $(ls "$CONTAINERS"/*/sandbox.conf 2>/dev/null | xargs -n1 dirname | xargs -n1 basename | tr '\n' ' ')
 EOF
@@ -80,6 +99,9 @@ source "$AGENT_DIR/sandbox.conf"
 PROJECT="$(cd "$PROJECT" && pwd -P)"
 HOST_HOME="$(cd "$HOME" && pwd -P)"
 [[ "$PROJECT" != "$HOST_HOME" && "$PROJECT" != / ]] || die "refusing to mount $PROJECT"
+# home/ holds every agent's credentials; it is never a project.
+[[ "$PROJECT" != "$ROOT/home" && "$PROJECT" != "$ROOT/home/"* ]] ||
+	die "refusing to mount $PROJECT, it holds agent credentials"
 
 # Mirror the path relative to $HOME so agent session history stays stable.
 if [[ "$PROJECT" == "$HOST_HOME"/* ]]; then
@@ -97,6 +119,19 @@ container_state() {
 	docker container inspect -f '{{.State.Status}}' "$NAME" 2>/dev/null || true
 }
 
+ensure_network() {
+	local icc
+	if icc="$(docker network inspect -f \
+		'{{index .Options "com.docker.network.bridge.enable_icc"}}' "$NETWORK" 2>/dev/null)"; then
+		[[ "$icc" == false ]] ||
+			die "docker network $NETWORK allows inter-container traffic; remove it"
+		return
+	fi
+	echo "sb: creating docker network $NETWORK" >&2
+	docker network create -o com.docker.network.bridge.enable_icc=false \
+		"$NETWORK" >/dev/null
+}
+
 if [[ $STOP -eq 1 ]]; then
 	[[ -n "$(container_state)" ]] && docker stop "$NAME" >/dev/null
 	exit 0
@@ -107,6 +142,18 @@ if [[ $RECREATE -eq 1 && -n "$(container_state)" ]]; then
 	docker rm -f "$NAME" >/dev/null
 fi
 
+# Containers created before the hardening keep their old, permissive settings.
+if [[ -n "$(container_state)" ]] &&
+	! docker container inspect -f '{{.HostConfig.SecurityOpt}}' "$NAME" 2>/dev/null |
+		grep -q no-new-privileges; then
+	die "$NAME predates the sandbox hardening, run with --recreate"
+fi
+
+if [[ $REBUILD -eq 1 ]] || ! docker image inspect sandbox-base >/dev/null 2>&1; then
+	echo "sb: building sandbox-base" >&2
+	docker build -t sandbox-base "$CONTAINERS/base"
+	REBUILD=1
+fi
 if [[ $REBUILD -eq 1 ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "sb: building $IMAGE" >&2
 	docker build -t "$IMAGE" "$AGENT_DIR"
@@ -115,14 +162,33 @@ fi
 case "$(container_state)" in
 	running) ;;
 	"")
+		ensure_network
+		# The main process is root only so sandbox-init can install the
+		# firewall; the agent is exec'd as $CUSER and never sees those rights.
 		args=(
 			-d --name "$NAME" --hostname "$AGENT"
 			--label sandbox.agent="$AGENT" --label sandbox.project="$PROJECT"
+			--user 0:0
+			--security-opt no-new-privileges
+			--cap-drop ALL --cap-add NET_ADMIN
+			--network "$NETWORK"
+			--sysctl net.ipv6.conf.all.disable_ipv6=1
+			--sysctl net.ipv6.conf.default.disable_ipv6=1
+			--pids-limit "$SB_PIDS"
+			--ulimit core=0 --ulimit nofile=8192:16384
 			-e PATH="$CPATH" -e COLORTERM=truecolor
+			-e HOME="$CHOME" -e USER="$CUSER"
 			-e SANDBOX_HOST="$(hostname -s)" -e SANDBOX_PROJECT="${PROJECT/#"$HOST_HOME"/\~}"
 			-v "$PROJECT:$CPROJECT" -w "$CPROJECT"
 			-v "$CONTAINERS/tmux.conf:$CHOME/.tmux.conf:ro"
 		)
+		for d in $SB_DNS; do
+			args+=(--dns "$d")
+		done
+		[[ -n "$SB_MEMORY" ]] && args+=(--memory "$SB_MEMORY")
+		[[ -n "$SB_CPUS" ]] && args+=(--cpus "$SB_CPUS")
+		[[ -n "$SB_BLOCKED_NETS" ]] && args+=(-e SANDBOX_BLOCKED_NETS="$SB_BLOCKED_NETS")
+		[[ -n "$SB_FIREWALL" ]] && args+=(-e SANDBOX_FIREWALL="$SB_FIREWALL")
 		for m in ${CONFIG_MOUNTS[@]+"${CONFIG_MOUNTS[@]}"}; do
 			host="$ROOT/${m%%:*}"
 			mkdir -p "$host"
@@ -131,15 +197,43 @@ case "$(container_state)" in
 		for e in ${AGENT_ENV[@]+"${AGENT_ENV[@]}"}; do
 			args+=(-e "$e")
 		done
+		# Working on this repo would otherwise expose every agent's stored
+		# credentials, so shadow home/ with an empty read-only tmpfs.
+		if [[ "$ROOT" == "$PROJECT" || "$ROOT" == "$PROJECT"/* ]]; then
+			rel="${ROOT#"$PROJECT"}"
+			args+=(--tmpfs "$CPROJECT${rel}/home:ro,size=1m")
+		fi
 		[[ -f "$HOME/.gitconfig" ]] && args+=(-v "$HOME/.gitconfig:$CHOME/.gitconfig:ro")
-		docker run "${args[@]}" "$IMAGE" sleep infinity >/dev/null
+		# Absolute: a bare name is resolved through PATH, which starts in
+		# the agent-writable ~/.local/bin, on every start.
+		docker run "${args[@]}" "$IMAGE" /usr/local/bin/sandbox-init >/dev/null
 		;;
 	*) docker start "$NAME" >/dev/null ;;
 esac
 
+# Never attach before sandbox-init reports the firewall is up; it exits
+# instead of signalling if the rules could not be installed.
+wait_ready() {
+	local i
+	for ((i = 0; i < 100; i++)); do
+		[[ "$(container_state)" == running ]] || return 1
+		# The marker holds PID 1's start time, so a stale one never matches.
+		docker exec --user "$CUSER" "$NAME" sh -c \
+			'[ "$(cat /run/sandbox-ready)" = "$(awk "{print \$22}" /proc/1/stat)" ]' \
+			2>/dev/null && return 0
+		sleep 0.1
+	done
+	return 1
+}
+
+if ! wait_ready; then
+	docker logs --tail 20 "$NAME" >&2 || true
+	die "sandbox $NAME did not come up"
+fi
+
 # Build the agent command line; when the agent exits, the window drops to bash.
 cmd="$(printf '%q ' "${AGENT_CMD[@]}" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"})"
-docker exec -it "$NAME" bash -c '
+docker exec -it --user "$CUSER" "$NAME" bash -c '
 	set -e
 	if ! command -v tmux >/dev/null; then
 		echo "sb: tmux is not installed in this image" >&2; exit 1

@@ -9,6 +9,9 @@ tool does and how to use it.
   docker container attached to tmux.
 - `containers/base/Dockerfile` builds the `sandbox-base` image. Every agent image is
   `FROM sandbox-base`, and `bin/sb` builds base automatically.
+- `containers/base/sandbox-init` is the container's PID 1. It runs as root,
+  installs the egress firewall, then idles. The agent is attached with
+  `docker exec --user agent` and never has those privileges.
 - `containers/<agent>/` contains a `Dockerfile` and a `sandbox.conf`. Only directories that
   have a `sandbox.conf` are runnable agents.
 - `home/<agent>/` holds the agents' persisted config and **credentials**. It is
@@ -17,9 +20,13 @@ tool does and how to use it.
 ## Adding or changing an agent
 
 - Dockerfile: start with `FROM sandbox-base` and add only the agent install. Base
-  already has the user `agent`, sudo, tmux, git, python3, node/npm and
+  already has the user `agent`, tmux, git, python3, node/npm, iptables and
   `~/.local/bin` on PATH. Put shared tooling in `containers/base`, not in an agent
   image. If you install as root, switch back with `USER agent`.
+- There is no sudo in the image and the runtime drops all capabilities, so an
+  agent cannot install system packages at run time. Anything it needs belongs in
+  `containers/base/Dockerfile`. Do not add `sudo` back, and do not add
+  capabilities or mounts to `bin/sb` without being asked.
 - `sandbox.conf` is sourced as bash and may set:
   - `AGENT_CMD`, an array, **required**: the command run in tmux window 1
   - `CONFIG_MOUNTS`, an array of `"host:container"`; host is relative to the repo
@@ -36,8 +43,10 @@ tool does and how to use it.
 - Run `bash -n bin/sb` and `shellcheck bin/sb` if they are available.
 - If you change the CLI (options, usage text), update the Usage section of
   README.md to match. If you change how containers are named, mounted or built,
-  update "How it works".
-- Don't weaken the guard that refuses to mount `$HOME` or `/`.
+  update "How it works". If you change the sandbox boundary, update "Isolation".
+- Don't weaken the guard that refuses to mount `$HOME` or `/`, the tmpfs that
+  hides `home/` when the project contains this repo, or the `--cap-drop` /
+  `no-new-privileges` / firewall settings.
 
 ## Testing
 
@@ -49,6 +58,11 @@ bin/sb claude /tmp/sbx-test              # builds base, then claude; attaches
 bin/sb list
 bin/sb claude /tmp/sbx-test --stop
 ```
+
+After changing anything security related, check from inside the sandbox that
+`id` shows no groups, `sudo` is absent, `curl -m 5 http://192.168.1.1` and
+`curl -m 5 http://169.254.169.254` fail, and `curl -sI https://github.com`
+still works. `docker logs <container>` shows what `sandbox-init` did.
 
 ## Known issues
 

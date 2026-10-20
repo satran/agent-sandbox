@@ -37,6 +37,18 @@ options:
   created; if the session is already running, the args are ignored with a warning.
 - `sb list` shows all sandbox containers with their status and project path.
 
+These environment variables are read when a container is **created**, so change
+them together with `--recreate`:
+
+| variable | default | meaning |
+|---|---|---|
+| `SB_MEMORY` | unset | memory cap, e.g. `8g` |
+| `SB_CPUS` | unset | CPU cap, e.g. `4` |
+| `SB_PIDS` | `2048` | process limit |
+| `SB_DNS` | `1.1.1.1 8.8.8.8` | resolvers; must be reachable, i.e. not on your LAN |
+| `SB_BLOCKED_NETS` | see [Isolation](#isolation) | networks to deny egress to |
+| `SB_FIREWALL` | `on` | `off` disables the egress firewall (debugging only) |
+
 ## How it works
 
 For `sb <agent> <path>`:
@@ -53,22 +65,67 @@ For `sb <agent> <path>`:
    `sandbox-<agent>` from `containers/<agent>`. Each is built only if missing,
    or always with `--rebuild` (the layer cache keeps that fast).
 4. **Container.** It is named `sandbox-<agent>-<path-slug>-<6-char sha1 of path>`
-   and labelled `sandbox.agent` / `sandbox.project`. It runs `sleep infinity`, so
-   it stays alive between sessions; a stopped container is restarted. The mounts are:
+   and labelled `sandbox.agent` / `sandbox.project`. It runs `sandbox-init`, which
+   installs the egress firewall and then idles, so the container stays alive
+   between sessions; a stopped container is restarted. The mounts are:
    - the project directory (read-write)
    - each `CONFIG_MOUNTS` entry (host side under this repo, created if missing)
    - `~/.gitconfig` read-only, if present
+   - an empty read-only tmpfs over this repo's `home/`, if the project contains it
 
-   Environment: `PATH`, `COLORTERM=truecolor`, plus `AGENT_ENV`.
-5. **Attach.** `docker exec` attaches to a tmux session named `sandbox`:
+   Environment: `PATH`, `HOME`, `USER`, `COLORTERM=truecolor`, plus `AGENT_ENV`.
+5. **Attach.** `docker exec --user agent` attaches to a tmux session named `sandbox`:
    - window 1 (named after the agent) runs `AGENT_CMD`, and drops to bash when the agent exits
    - window 2 (`shell`) is a plain shell in the project
+
+## Isolation
+
+The agent runs with its permission checks disabled, so the container is the
+only thing standing between it and your machine:
+
+- **No root.** There is no `sudo` and the `agent` user is not in any privileged
+  group. Setuid and setgid bits are stripped from every file in the image, and
+  `--security-opt no-new-privileges` stops a setuid binary or file capability
+  from working even if one reappears.
+- **No capabilities.** `--cap-drop ALL`. The container keeps only `NET_ADMIN`,
+  and only so that `sandbox-init` — the root process the agent cannot reach —
+  can install the firewall at startup.
+- **No route to your network.** Egress is rejected to `10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` (which covers cloud
+  instance metadata), `100.64.0.0/10` and `192.0.0.0/24`. That blocks your
+  router, the docker host and anything you have listening on localhost or a LAN
+  address, while leaving the public internet, DNS and `git`/`npm`/`pip`
+  working. IPv6 is disabled by sysctl and dropped by ip6tables. Inbound is limited to established
+  connections and the bridge, so published ports still work.
+- **Its own network.** Sandboxes share a `sandbox` bridge with inter-container
+  communication disabled, and use public resolvers rather than the host's, so
+  one sandbox cannot reach another.
+- **Resource limits.** 2048 processes, no core dumps, and optional memory and
+  CPU caps, so a runaway agent cannot take the host down.
+- **Nothing privileged is mounted.** No docker socket, no SSH agent, no host
+  `$HOME`; mounting `$HOME`, `/` or anything under this repo's `home/` as the
+  project is refused. If the project
+  tree contains this repo, `home/` is shadowed with an empty tmpfs so the agent
+  cannot read the other agents' credentials.
+
+What this does **not** protect:
+
+- The project directory is mounted read-write. The agent can wreck anything in
+  it, so keep it committed and pushed.
+- The agent's own credentials in `home/<agent>/` are mounted read-write,
+  because the agent needs them. Anything it can reach on the public internet,
+  it can reach with those.
+- A container is still a shared kernel. This raises the cost of an escape a
+  long way; it does not make it impossible.
+
+`sudo apt-get install` no longer works inside the sandbox. Add the package to
+`containers/base/Dockerfile` and run `sb <agent> --rebuild` instead.
 
 ## Layout
 
 ```
 bin/sb                       the launcher
-containers/base/             shared base image (sandbox-base)
+containers/base/             shared base image (sandbox-base) + sandbox-init
 containers/<agent>/          Dockerfile (FROM sandbox-base) + sandbox.conf
 containers/docker-compose.yml  older compose-based setup (mounts ../../src)
 home/<agent>/                persisted agent config & credentials (gitignored)
@@ -77,9 +134,10 @@ home/<agent>/                persisted agent config & credentials (gitignored)
 ### The base image
 
 `containers/base/Dockerfile` (Ubuntu 26.04) provides everything the agents share:
-- the user `agent` with passwordless sudo
+- the unprivileged user `agent` (no sudo)
 - curl, vim, emacs-nox, tmux, fish and git
 - python3 with pip and venv (`python` → `python3`), plus node and npm
+- iptables and iproute2, used by `sandbox-init`
 - `~/.local/bin` on `PATH`
 
 Agent Dockerfiles only add the agent itself.
@@ -126,6 +184,8 @@ Agent Dockerfiles only add the agent itself.
 
 - The container user `agent` is hard-coded in `bin/sb` (`CUSER`) and in
   `containers/base/Dockerfile`.
-- Security: the agents run with permission checks disabled and the container
-  user has passwordless sudo, so the container is the only boundary. The
-  project directory is mounted read-write, and the agent can change anything in it.
+- Containers created before the hardening keep their old, permissive settings.
+  `sb` refuses to attach to them; fix it with `--recreate`.
+- `ping` and other raw sockets do not work, because `NET_RAW` is dropped.
+- The firewall blocks whole network ranges, not domains, so the agent can still
+  talk to any public host. See [Isolation](#isolation) for what that means.

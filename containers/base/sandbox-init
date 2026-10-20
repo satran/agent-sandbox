@@ -1,0 +1,86 @@
+#!/bin/sh
+#
+# PID 1 of a sandbox container. Installs the egress firewall as root, then
+# idles. The agent is attached separately with `docker exec --user agent`, so
+# it never holds the privileges used here and cannot undo these rules.
+#
+# Set SANDBOX_FIREWALL=off to skip the firewall (debugging only).
+
+set -eu
+
+# The inherited PATH starts with ~agent/.local/bin, which the agent can write.
+# This runs as root on every container start, so never resolve through it.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# bin/sb waits for this before attaching, so the agent never gets a shell
+# while the rules are still going in. It holds PID 1's start time, so a file
+# left over from a previous run of a restarted container never matches.
+READY=/run/sandbox-ready
+rm -f "$READY"
+
+# Networks the sandbox must not reach: the LAN it is bridged onto, the docker
+# host itself, and cloud instance metadata. SANDBOX_BLOCKED_NETS overrides it.
+BLOCKED_NETS="${SANDBOX_BLOCKED_NETS:-\
+10.0.0.0/8 \
+172.16.0.0/12 \
+192.168.0.0/16 \
+169.254.0.0/16 \
+100.64.0.0/10 \
+192.0.0.0/24}"
+
+warn() { echo "sandbox-init: $*" >&2; }
+die() { warn "$*"; exit 1; }
+
+# Subnets reachable over our own link, i.e. the bridge the host talks to us on.
+link_subnets() {
+	ip -4 route show scope link 2>/dev/null | awk '{print $1}'
+}
+
+apply_firewall() {
+	iptables -F || die "iptables is not usable; the container needs CAP_NET_ADMIN"
+	iptables -P FORWARD DROP
+	iptables -P INPUT DROP
+	iptables -P OUTPUT ACCEPT
+
+	iptables -A INPUT -i lo -j ACCEPT
+	iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+	# Traffic to published ports is DNAT'd in from the bridge gateway.
+	for net in $(link_subnets); do
+		iptables -A INPUT -s "$net" -j ACCEPT
+	done
+
+	iptables -A OUTPUT -o lo -j ACCEPT
+	# Replies on connections we already accepted, before the rejects below.
+	iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+	for net in $BLOCKED_NETS; do
+		iptables -A OUTPUT -d "$net" -j REJECT --reject-with icmp-net-unreachable
+	done
+}
+
+# Nothing here speaks IPv6, and link-local addresses would route straight to
+# the host, so drop it outright rather than maintaining a second blocklist.
+block_ipv6() {
+	if ! command -v ip6tables >/dev/null || ! ip6tables -F 2>/dev/null; then
+		# bin/sb also disables IPv6 by sysctl; that alone is enough.
+		[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = 1 ] ||
+			die "IPv6 is enabled and ip6tables is unusable"
+		return 0
+	fi
+	ip6tables -P FORWARD DROP
+	ip6tables -P INPUT DROP
+	ip6tables -P OUTPUT DROP
+	ip6tables -A INPUT -i lo -j ACCEPT
+	ip6tables -A OUTPUT -o lo -j ACCEPT
+}
+
+if [ "${SANDBOX_FIREWALL:-on}" = off ]; then
+	warn "firewall disabled, the sandbox can reach your LAN and host"
+else
+	apply_firewall
+	block_ipv6
+	echo "sandbox-init: egress blocked to $BLOCKED_NETS"
+fi
+
+awk '{print $22}' /proc/1/stat > "$READY"
+exec sleep infinity
