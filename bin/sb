@@ -132,6 +132,92 @@ ensure_network() {
 		"$NETWORK" >/dev/null
 }
 
+# Host-side state: snapshots and generated files. Under home/, so it is
+# gitignored, never a project, and hidden from a sandbox working on this repo.
+STATE_DIR="$ROOT/home/.sb"
+
+# Files in the project that the host runs as code: git hooks and config
+# (core.fsmonitor, core.hooksPath, filters), direnv and VS Code tasks. One
+# "hash<TAB>exec<TAB>link<TAB>path" line each, so any change shows up.
+guard_snapshot() {
+	local f g
+	find "$PROJECT" -maxdepth 4 \( -name node_modules -o -name .venv \) -prune -o \
+		-type d -name .git -prune -print -o \
+		\( -type f -o -type l \) \( -name .envrc -o -path '*/.vscode/*.json' \) -print \
+		2>/dev/null |
+		while IFS= read -r g; do
+			if [[ -d "$g" && ! -L "$g" ]]; then
+				find "$g/config" "$g/hooks" \( -type f -o -type l \) 2>/dev/null
+			else
+				printf '%s\n' "$g"
+			fi
+		done | LC_ALL=C sort | while IFS= read -r f; do
+			printf '%s\t%s\t%s\t%s\n' \
+				"$(shasum <"$f" 2>/dev/null | cut -c1-40 || true)" \
+				"$([[ -x "$f" ]] && echo x || echo -)" \
+				"$(readlink "$f" || echo -)" "${f#"$PROJECT"/}"
+		done
+}
+
+# Warn about changes since the last check, then take a new baseline. Warn
+# only: the agent may have had a good reason, but you should know.
+guard_check() {
+	local snap="$STATE_DIR/$NAME.guard" now changed
+	now="$(guard_snapshot || true)"
+	if [[ -f "$snap" ]]; then
+		changed="$(diff "$snap" - <<<"$now" | sed -n 's/^[<>] //p' | cut -f4 | sort -u || true)"
+		if [[ -n "$changed" ]]; then
+			{
+				echo "sb: WARNING: files that run code on the host changed since the last check:"
+				sed 's/^/sb:   /' <<<"$changed"
+				echo "sb: review them before you run git or open the project in an editor."
+			} >&2
+		fi
+	fi
+	mkdir -p "$STATE_DIR"
+	printf '%s\n' "$now" >"$snap"
+}
+
+# Only identity and harmless preferences reach the sandbox; the host config
+# may hold tokens (url.*.insteadOf, http.*.extraheader, credential.*).
+GIT_SAFE_KEYS='^(user\.(name|email)|init\.defaultbranch|alias\..*|color\..*|core\.(autocrlf|eol|whitespace|quotepath)|pull\.(rebase|ff)|push\.(default|autosetupremote|followtags)|fetch\.(prune|prunetags)|merge\.(conflictstyle|ff)|rebase\.(autosquash|autostash|updaterefs)|rerere\.enabled|diff\.(algorithm|colormoved|renames)|(branch|tag)\.sort|column\.ui|help\.autocorrect|commit\.verbose)$'
+
+write_gitconfig() {
+	local out="$1" entry key val
+	: >"$out"
+	command -v git >/dev/null || return 0
+	{ git config --global --includes --null --get-regexp "$GIT_SAFE_KEYS" 2>/dev/null || true; } |
+		while IFS= read -r -d '' entry; do
+			key="${entry%%$'\n'*}" val=true
+			[[ "$entry" == *$'\n'* ]] && val="${entry#*$'\n'}"
+			git config -f "$out" --add "$key" "$val" || true
+		done
+}
+
+# Docker Desktop runs containers in a VM that sees every directory listed
+# under File sharing; by default that is all of /Users. Code that escapes a
+# container lands in that VM, so it should see no more than sb mounts.
+check_file_sharing() {
+	local f d
+	[[ "$(uname -s)" == Darwin ]] || return 0
+	for f in "$HOME/Library/Group Containers/group.com.docker/settings-store.json" \
+		"$HOME/Library/Group Containers/group.com.docker/settings.json"; do
+		[[ -f "$f" ]] || continue
+		tr -d '\n' <"$f" | grep -oiE '"filesharingDirectories" *: *\[[^]]*\]' |
+			sed -E 's/^[^[]*\[//; s/\]$//' | tr ',' '\n' |
+			sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' |
+			while IFS= read -r d; do
+				[[ -n "$d" ]] || continue
+				d="${d%/}"
+				if [[ "$HOST_HOME" == "$d" || "$HOST_HOME" == "$d"/* || -z "$d" ]]; then
+					echo "sb: Docker Desktop shares ${d:-/} with its VM, which includes your home directory." >&2
+					echo "sb: limit Settings > Resources > File sharing to your projects and $ROOT." >&2
+				fi
+			done || true
+		return 0
+	done
+}
+
 if [[ $STOP -eq 1 ]]; then
 	[[ -n "$(container_state)" ]] && docker stop "$NAME" >/dev/null
 	exit 0
@@ -163,6 +249,7 @@ case "$(container_state)" in
 	running) ;;
 	"")
 		ensure_network
+		check_file_sharing
 		# The main process is root only so sandbox-init can install the
 		# firewall; the agent is exec'd as $CUSER and never sees those rights.
 		args=(
@@ -203,7 +290,10 @@ case "$(container_state)" in
 			rel="${ROOT#"$PROJECT"}"
 			args+=(--tmpfs "$CPROJECT${rel}/home:ro,size=1m")
 		fi
-		[[ -f "$HOME/.gitconfig" ]] && args+=(-v "$HOME/.gitconfig:$CHOME/.gitconfig:ro")
+		mkdir -p "$STATE_DIR"
+		write_gitconfig "$STATE_DIR/$NAME.gitconfig"
+		[[ -s "$STATE_DIR/$NAME.gitconfig" ]] &&
+			args+=(-v "$STATE_DIR/$NAME.gitconfig:$CHOME/.gitconfig:ro")
 		# Absolute: a bare name is resolved through PATH, which starts in
 		# the agent-writable ~/.local/bin, on every start.
 		docker run "${args[@]}" "$IMAGE" /usr/local/bin/sandbox-init >/dev/null
@@ -231,8 +321,12 @@ if ! wait_ready; then
 	die "sandbox $NAME did not come up"
 fi
 
+# The agent keeps running while detached, so check on the way in and out.
+guard_check
+
 # Build the agent command line; when the agent exits, the window drops to bash.
 cmd="$(printf '%q ' "${AGENT_CMD[@]}" ${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"})"
+rc=0
 docker exec -it --user "$CUSER" "$NAME" bash -c '
 	set -e
 	if ! command -v tmux >/dev/null; then
@@ -245,4 +339,6 @@ docker exec -it --user "$CUSER" "$NAME" bash -c '
 		echo "sb: session already running, ignoring agent args" >&2
 	fi
 	exec tmux attach -t sandbox
-' _ "$AGENT" "$CPROJECT" "$cmd" "${AGENT_ARGS[*]-}"
+' _ "$AGENT" "$CPROJECT" "$cmd" "${AGENT_ARGS[*]-}" || rc=$?
+guard_check
+exit "$rc"

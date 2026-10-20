@@ -70,13 +70,17 @@ For `sb <agent> <path>`:
    between sessions; a stopped container is restarted. The mounts are:
    - the project directory (read-write)
    - each `CONFIG_MOUNTS` entry (host side under this repo, created if missing)
-   - `~/.gitconfig` read-only, if present
+   - a filtered copy of your global git config, read-only (see
+     [Isolation](#isolation))
    - an empty read-only tmpfs over this repo's `home/`, if the project contains it
 
    Environment: `PATH`, `HOME`, `USER`, `COLORTERM=truecolor`, plus `AGENT_ENV`.
 5. **Attach.** `docker exec --user agent` attaches to a tmux session named `sandbox`:
    - window 1 (named after the agent) runs `AGENT_CMD`, and drops to bash when the agent exits
    - window 2 (`shell`) is a plain shell in the project
+
+   Before attaching and again after you detach, `sb` checks the project for
+   changed host-executed files (see [Isolation](#isolation)).
 
 ## Isolation
 
@@ -95,8 +99,9 @@ only thing standing between it and your machine:
   instance metadata), `100.64.0.0/10` and `192.0.0.0/24`. That blocks your
   router, the docker host and anything you have listening on localhost or a LAN
   address, while leaving the public internet, DNS and `git`/`npm`/`pip`
-  working. IPv6 is disabled by sysctl and dropped by ip6tables. Inbound is limited to established
-  connections and the bridge, so published ports still work.
+  working. IPv6 is disabled by sysctl and dropped by ip6tables. Inbound is
+  limited to established connections and the bridge, so published ports still
+  work.
 - **Its own network.** Sandboxes share a `sandbox` bridge with inter-container
   communication disabled, and use public resolvers rather than the host's, so
   one sandbox cannot reach another.
@@ -104,9 +109,31 @@ only thing standing between it and your machine:
   CPU caps, so a runaway agent cannot take the host down.
 - **Nothing privileged is mounted.** No docker socket, no SSH agent, no host
   `$HOME`; mounting `$HOME`, `/` or anything under this repo's `home/` as the
-  project is refused. If the project
-  tree contains this repo, `home/` is shadowed with an empty tmpfs so the agent
-  cannot read the other agents' credentials.
+  project is refused. If the project tree contains this repo, `home/` is
+  shadowed with an empty tmpfs so the agent cannot read the other agents'
+  credentials.
+- **No host git secrets.** Your global git config is not mounted as is: `sb`
+  writes a copy with only identity and harmless preferences (`user.name`,
+  `user.email`, `alias.*`, `color.*`, `pull.*`, `push.default` and the like) to
+  `home/.sb/<container>.gitconfig`. Tokens in `url.*.insteadOf`,
+  `http.*.extraheader` or `credential.*` stay on the host. The copy is
+  regenerated when the container is created, so use `--recreate` after
+  changing your git config.
+- **Warnings about host-executed files.** The agent can write files that the
+  *host* later runs: `.git/hooks/*`, `.git/config` (`core.fsmonitor`,
+  `core.hooksPath`, filter drivers), `.envrc` and `.vscode/*.json`. Your next
+  `git status` or editor open would run them outside the sandbox. `sb` hashes
+  these (in the project and nested repos up to 4 levels deep, skipping
+  `node_modules` and `.venv`) when you attach and when you detach, and
+  prints a warning listing any that changed. It only warns; nothing is
+  blocked. Changes made while you are detached are reported at the next
+  attach, so run `sb` again before you run git on the host. Snapshots are in
+  `home/.sb/`.
+- **Docker Desktop file sharing.** On macOS, Docker Desktop's VM can see every
+  directory under Settings > Resources > File sharing, which defaults to all
+  of `/Users`. Code that escapes a container lands in that VM. When it creates
+  a container, `sb` warns if that list covers your home directory. Limit it to
+  your project directories and this repo; nothing else is needed.
 
 What this does **not** protect:
 

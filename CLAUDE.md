@@ -16,6 +16,8 @@ tool does and how to use it.
   have a `sandbox.conf` are runnable agents.
 - `home/<agent>/` holds the agents' persisted config and **credentials**. It is
   gitignored. Never commit it, and never read or print its contents.
+  `home/.sb/` is `sb`'s own host-side state (guard snapshots, the filtered
+  gitconfig); it lives there so it is never visible to a sandbox.
 
 ## Adding or changing an agent
 
