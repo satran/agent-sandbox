@@ -90,8 +90,8 @@ Agent Dockerfiles only add the agent itself.
 |------------|----------------|-----------------------------|
 | `claude`   | yes            | yes                         |
 | `gemini`   | yes            | yes                         |
-| `omp`      | no             | no, image only              |
-| `opencode` | no             | no, image only              |
+| `omp`      | yes            | yes                         |
+| `opencode` | yes            | yes                         |
 | `sandbox`  | no             | no, plain dev box           |
 | `cliproxy` | —              | empty placeholder           |
 
