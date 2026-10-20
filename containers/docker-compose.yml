@@ -10,8 +10,8 @@ services:
     build: ./gemini
     container_name: gemini
     volumes:
-      - ../home/gemini/.gemini:/home/satran/.gemini
-      - ../../src:/home/satran/src
+      - ../home/gemini/.gemini:/home/agent/.gemini
+      - ../../src:/home/agent/src
     stdin_open: true # allows interactive terminal
     tty: true        # allows interactive terminal
     hostname: gemini
@@ -20,8 +20,8 @@ services:
     build: ./claude
     container_name: claude
     volumes:
-      - ../home/claude/.claude:/home/satran/.claude
-      - ../../src:/home/satran/src
+      - ../home/claude/.claude:/home/agent/.claude
+      - ../../src:/home/agent/src
     stdin_open: true # allows interactive terminal
     tty: true        # allows interactive terminal
     hostname: claude
@@ -30,8 +30,8 @@ services:
     build: ./omp
     container_name: omp
     volumes:
-      - ../home/omp/:/home/satran/.omp
-      - ../../src:/home/satran/src
+      - ../home/omp/:/home/agent/.omp
+      - ../../src:/home/agent/src
     stdin_open: true # allows interactive terminal
     tty: true        # allows interactive terminal
     hostname: omp

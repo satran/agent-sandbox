@@ -17,9 +17,9 @@ tool does and how to use it.
 ## Adding or changing an agent
 
 - Dockerfile: start with `FROM sandbox-base` and add only the agent install. Base
-  already has the user `satran`, sudo, tmux, git, python3, node/npm and
+  already has the user `agent`, sudo, tmux, git, python3, node/npm and
   `~/.local/bin` on PATH. Put shared tooling in `containers/base`, not in an agent
-  image. If you install as root, switch back with `USER satran`.
+  image. If you install as root, switch back with `USER agent`.
 - `sandbox.conf` is sourced as bash and may set:
   - `AGENT_CMD`, an array, **required**: the command run in tmux window 1
   - `CONFIG_MOUNTS`, an array of `"host:container"`; host is relative to the repo

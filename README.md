@@ -45,8 +45,8 @@ For `sb <agent> <path>`:
    [Adding an agent](#adding-an-agent)).
 2. **Path mapping.** The project is mounted at the same path relative to
    `$HOME`, so agent session history keyed by path stays stable:
-   - `~/src/foo` → `/home/satran/src/foo`
-   - `/opt/foo` (outside `$HOME`) → `/home/satran/ext/opt/foo`
+   - `~/src/foo` → `/home/agent/src/foo`
+   - `/opt/foo` (outside `$HOME`) → `/home/agent/ext/opt/foo`
 
    Mounting `$HOME` itself or `/` is refused.
 3. **Images.** `sandbox-base` is built from `containers/base`, then
@@ -77,7 +77,7 @@ home/<agent>/                persisted agent config & credentials (gitignored)
 ### The base image
 
 `containers/base/Dockerfile` (Ubuntu 26.04) provides everything the agents share:
-- the user `satran` with passwordless sudo
+- the user `agent` with passwordless sudo
 - curl, vim, emacs-nox, tmux, fish and git
 - python3 with pip and venv (`python` → `python3`), plus node and npm
 - `~/.local/bin` on `PATH`
@@ -108,14 +108,14 @@ Agent Dockerfiles only add the agent itself.
    # or a system-wide install:
    # USER root
    # RUN npm install -g some-agent
-   # USER satran
+   # USER agent
    ```
 
 2. Create `containers/<name>/sandbox.conf`. It is bash, sourced by `bin/sb`:
 
    ```bash
    # host paths are relative to the repo root; created automatically
-   CONFIG_MOUNTS=("home/<name>/.<name>:/home/satran/.<name>")
+   CONFIG_MOUNTS=("home/<name>/.<name>:/home/agent/.<name>")
    AGENT_ENV=(SOME_VAR=value)
    AGENT_CMD=(<name> --some-flag)   # required
    ```
@@ -124,7 +124,7 @@ Agent Dockerfiles only add the agent itself.
 
 ## Known issues
 
-- The container user `satran` is hard-coded in `bin/sb` (`CUSER`) and in
+- The container user `agent` is hard-coded in `bin/sb` (`CUSER`) and in
   `containers/base/Dockerfile`.
 - Security: the agents run with permission checks disabled and the container
   user has passwordless sudo, so the container is the only boundary. The

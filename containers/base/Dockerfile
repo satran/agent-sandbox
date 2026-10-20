@@ -22,13 +22,13 @@ RUN apt-get update && apt-get install -y \
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
 # Setup local user
-RUN useradd -ms /bin/bash satran
-RUN usermod -G sudo satran
+RUN useradd -ms /bin/bash agent
+RUN usermod -G sudo agent
 RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
-ENV PATH="/home/satran/.local/bin:$PATH"
+ENV PATH="/home/agent/.local/bin:$PATH"
 
-WORKDIR /home/satran
-USER satran
+WORKDIR /home/agent
+USER agent
 
 CMD ["/bin/bash"]
