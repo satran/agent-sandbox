@@ -29,6 +29,9 @@ options:
   --recreate   remove this project's container and start a fresh one
   --args ARGS  arguments for the agent, split like a shell command line
                (repeatable), e.g. --args '--plugin-dir src/plugin'
+  --mount DIR[:ro]
+               also mount DIR, read-write or :ro (repeatable; applied when
+               the container is created, so change with --recreate)
   --stop       stop this project's container
   -h, --help   show this help
 
@@ -44,6 +47,13 @@ Everything after -- is also passed to the agent, unchanged.
 - Anything after `--` is appended to the agent command unchanged, e.g.
   `sb claude -- --resume`. Agent args only apply when the tmux session is first
   created; if the session is already running, the args are ignored with a warning.
+- `--mount DIR` mounts another directory, e.g. a sibling repo or a shared
+  library, at the same mirrored path as the project (see
+  [How it works](#how-it-works)); add `:ro` to make it read-only:
+  `sb claude ~/src/app --mount ~/src/lib --mount ~/docs:ro`. Mounts are fixed
+  when the container is created. Later runs without `--mount` keep them;
+  passing a different set is refused until you add `--recreate`, and
+  `--recreate` without `--mount` drops them.
 - `sb list` shows all sandbox containers with their status and project path.
 
 These environment variables are read when a container is **created**, so change
@@ -69,7 +79,9 @@ For `sb <agent> <path>`:
    - `~/src/foo` → `/home/agent/src/foo`
    - `/opt/foo` (outside `$HOME`) → `/home/agent/ext/opt/foo`
 
-   Mounting `$HOME` itself or `/` is refused.
+   Extra `--mount` directories are mapped the same way. Mounting `/`,
+   `$HOME` or a parent of it, or anything under this repo's `home/` is
+   refused.
 3. **Images.** `sandbox-base` is built from `containers/base`, then
    `sandbox-<agent>` from `containers/<agent>`. Each is built only if missing,
    or always with `--rebuild` (the layer cache keeps that fast).
@@ -78,17 +90,21 @@ For `sb <agent> <path>`:
    installs the egress firewall and then idles, so the container stays alive
    between sessions; a stopped container is restarted. The mounts are:
    - the project directory (read-write)
+   - each `--mount` directory, read-write or read-only (also recorded in the
+     `sandbox.mounts` label)
    - each `CONFIG_MOUNTS` entry (host side under this repo, created if missing)
    - a filtered copy of your global git config, read-only (see
      [Isolation](#isolation))
-   - an empty read-only tmpfs over this repo's `home/`, if the project contains it
+   - an empty read-only tmpfs over this repo's `home/`, if the project or a
+     `--mount` contains it
 
    Environment: `PATH`, `HOME`, `USER`, `COLORTERM=truecolor`, plus `AGENT_ENV`.
 5. **Attach.** `docker exec --user agent` attaches to a tmux session named `sandbox`:
    - window 1 (named after the agent) runs `AGENT_CMD`, and drops to bash when the agent exits
    - window 2 (`shell`) is a plain shell in the project
 
-   Before attaching and again after you detach, `sb` checks the project for
+   Before attaching and again after you detach, `sb` checks the project and
+   writable `--mount` directories for
    changed host-executed files (see [Isolation](#isolation)).
 
 ## Isolation
@@ -117,10 +133,10 @@ only thing standing between it and your machine:
 - **Resource limits.** 2048 processes, no core dumps, and optional memory and
   CPU caps, so a runaway agent cannot take the host down.
 - **Nothing privileged is mounted.** No docker socket, no SSH agent, no host
-  `$HOME`; mounting `$HOME`, `/` or anything under this repo's `home/` as the
-  project is refused. If the project tree contains this repo, `home/` is
-  shadowed with an empty tmpfs so the agent cannot read the other agents'
-  credentials.
+  `$HOME`; mounting `/`, `$HOME` or a parent of it, or anything under this
+  repo's `home/` is refused, both as the project and with `--mount`. If a
+  mounted tree contains this repo, `home/` is shadowed with an empty tmpfs so
+  the agent cannot read the other agents' credentials.
 - **No host git secrets.** Your global git config is not mounted as is: `sb`
   writes a copy with only identity and harmless preferences (`user.name`,
   `user.email`, `alias.*`, `color.*`, `pull.*`, `push.default` and the like) to
@@ -132,7 +148,8 @@ only thing standing between it and your machine:
   *host* later runs: `.git/hooks/*`, `.git/config` (`core.fsmonitor`,
   `core.hooksPath`, filter drivers), `.envrc` and `.vscode/*.json`. Your next
   `git status` or editor open would run them outside the sandbox. `sb` hashes
-  these (in the project and nested repos up to 4 levels deep, skipping
+  these (in the project, writable `--mount` directories and nested repos up
+  to 4 levels deep, skipping
   `node_modules` and `.venv`) when you attach and when you detach, and
   prints a warning listing any that changed. It only warns; nothing is
   blocked. Changes made while you are detached are reported at the next
@@ -146,8 +163,10 @@ only thing standing between it and your machine:
 
 What this does **not** protect:
 
-- The project directory is mounted read-write. The agent can wreck anything in
-  it, so keep it committed and pushed.
+- The project directory, and any `--mount` without `:ro`, is mounted
+  read-write. The agent can wreck anything in it, so keep it committed and
+  pushed. A `:ro` mount can still be read, so don't mount anything holding
+  secrets.
 - The agent's own credentials in `home/<agent>/` are mounted read-write,
   because the agent needs them. Anything it can reach on the public internet,
   it can reach with those.

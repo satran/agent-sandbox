@@ -43,6 +43,9 @@ options:
   --recreate   remove this project's container and start a fresh one
   --args ARGS  arguments for the agent, split like a shell command line
                (repeatable), e.g. --args '--plugin-dir src/plugin'
+  --mount DIR[:ro]
+               also mount DIR, read-write or :ro (repeatable; applied when
+               the container is created, so change with --recreate)
   --stop       stop this project's container
   -h, --help   show this help
 
@@ -80,6 +83,7 @@ REBUILD=0 RECREATE=0 STOP=0
 # quoting works as on a command line; args after "--" are passed as-is.
 ARGS_STR=""
 AGENT_ARGS=()
+MOUNT_SPECS=()
 HAVE_PATH=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -90,6 +94,10 @@ while [[ $# -gt 0 ]]; do
 			[[ $# -ge 2 ]] || die "--args needs a value"
 			shift; ARGS_STR+=" $1" ;;
 		--args=*) ARGS_STR+=" ${1#--args=}" ;;
+		--mount)
+			[[ $# -ge 2 ]] || die "--mount needs a directory"
+			shift; MOUNT_SPECS+=("$1") ;;
+		--mount=*) MOUNT_SPECS+=("${1#--mount=}") ;;
 		-h|--help) usage; exit 0 ;;
 		--) shift; AGENT_ARGS=("$@"); break ;;
 		-*) die "unknown option $1 (pass agent options with --args)" ;;
@@ -109,20 +117,47 @@ AGENT_CMD=()
 source "$AGENT_DIR/sandbox.conf"
 [[ ${#AGENT_CMD[@]} -gt 0 ]] || die "$AGENT_DIR/sandbox.conf does not set AGENT_CMD"
 
-[[ -d "$PROJECT" ]] || die "no such directory: $PROJECT"
-PROJECT="$(cd "$PROJECT" && pwd -P)"
 HOST_HOME="$(cd "$HOME" && pwd -P)"
-[[ "$PROJECT" != "$HOST_HOME" && "$PROJECT" != / ]] || die "refusing to mount $PROJECT"
-# home/ holds every agent's credentials; it is never a project.
-[[ "$PROJECT" != "$ROOT/home" && "$PROJECT" != "$ROOT/home/"* ]] ||
-	die "refusing to mount $PROJECT, it holds agent credentials"
+
+# Never mount /, $HOME or a parent of it, or home/, which holds every
+# agent's credentials.
+check_mountable() {
+	[[ "$1" != / && "$1" != "$HOST_HOME" && "$HOST_HOME" != "$1"/* ]] ||
+		die "refusing to mount $1"
+	[[ "$1" != "$ROOT/home" && "$1" != "$ROOT/home/"* ]] ||
+		die "refusing to mount $1, it holds agent credentials"
+}
 
 # Mirror the path relative to $HOME so agent session history stays stable.
-if [[ "$PROJECT" == "$HOST_HOME"/* ]]; then
-	CPROJECT="$CHOME/${PROJECT#"$HOST_HOME"/}"
-else
-	CPROJECT="$CHOME/ext$PROJECT"
-fi
+container_path() {
+	if [[ "$1" == "$HOST_HOME"/* ]]; then
+		printf '%s\n' "$CHOME/${1#"$HOST_HOME"/}"
+	else
+		printf '%s\n' "$CHOME/ext$1"
+	fi
+}
+
+[[ -d "$PROJECT" ]] || die "no such directory: $PROJECT"
+PROJECT="$(cd "$PROJECT" && pwd -P)"
+check_mountable "$PROJECT"
+CPROJECT="$(container_path "$PROJECT")"
+
+# Extra mounts, resolved to "path" or "path:ro".
+MOUNTS=()
+for m in ${MOUNT_SPECS[@]+"${MOUNT_SPECS[@]}"}; do
+	ro=""
+	[[ "$m" == *:ro ]] && { m="${m%:ro}"; ro=":ro"; }
+	[[ -d "$m" ]] || die "no such directory: $m"
+	m="$(cd "$m" && pwd -P)"
+	check_mountable "$m"
+	[[ "$m" != *[:,$'\n']* ]] || die "cannot mount $m: ':', ',' or newline in the path"
+	[[ "$m" != "$PROJECT" ]] || die "$m is the project, it is already mounted"
+	for o in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
+		[[ "${o%:ro}" != "$m" ]] || die "$m is given twice"
+	done
+	MOUNTS+=("$m$ro")
+done
+MOUNTS_LABEL="$(printf '%s\n' ${MOUNTS[@]+"${MOUNTS[@]}"})"
 
 IMAGE="sandbox-$AGENT"
 SLUG="$(echo "${PROJECT#"$HOST_HOME"/}" | tr -c 'a-zA-Z0-9_.\n' '-' | sed 's/^-*//')"
@@ -154,18 +189,24 @@ STATE_DIR="$ROOT/home/.sb"
 # (core.fsmonitor, core.hooksPath, filters), direnv and VS Code tasks. One
 # "hash<TAB>exec<TAB>link<TAB>path" line each, so any change shows up.
 guard_snapshot() {
-	local f g
-	find "$PROJECT" -maxdepth 4 \( -name node_modules -o -name .venv \) -prune -o \
-		-type d -name .git -prune -print -o \
-		\( -type f -o -type l \) \( -name .envrc -o -path '*/.vscode/*.json' \) -print \
-		2>/dev/null |
+	local f g d dirs=("$PROJECT")
+	# Writable extra mounts are as exposed as the project.
+	for d in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
+		[[ "$d" == *:ro ]] || dirs+=("$d")
+	done
+	for d in "${dirs[@]}"; do
+		find "$d" -maxdepth 4 \( -name node_modules -o -name .venv \) -prune -o \
+			-type d -name .git -prune -print -o \
+			\( -type f -o -type l \) \( -name .envrc -o -path '*/.vscode/*.json' \) -print \
+			2>/dev/null || true
+	done |
 		while IFS= read -r g; do
 			if [[ -d "$g" && ! -L "$g" ]]; then
 				find "$g/config" "$g/hooks" \( -type f -o -type l \) 2>/dev/null
 			else
 				printf '%s\n' "$g"
 			fi
-		done | LC_ALL=C sort | while IFS= read -r f; do
+		done | LC_ALL=C sort -u | while IFS= read -r f; do
 			printf '%s\t%s\t%s\t%s\n' \
 				"$(shasum <"$f" 2>/dev/null | cut -c1-40 || true)" \
 				"$([[ -x "$f" ]] && echo x || echo -)" \
@@ -179,7 +220,7 @@ guard_check() {
 	local snap="$STATE_DIR/$NAME.guard" now changed
 	now="$(guard_snapshot || true)"
 	if [[ -f "$snap" ]]; then
-		changed="$(diff "$snap" - <<<"$now" | sed -n 's/^[<>] //p' | cut -f4 | sort -u || true)"
+		changed="$(diff "$snap" - <<<"$now" | sed -n 's/^[<>] //p' | cut -f4 | sed '/^$/d' | sort -u || true)"
 		if [[ -n "$changed" ]]; then
 			{
 				echo "sb: WARNING: files that run code on the host changed since the last check:"
@@ -249,6 +290,20 @@ if [[ -n "$(container_state)" ]] &&
 	die "$NAME predates the sandbox hardening, run with --recreate"
 fi
 
+# Mounts are fixed when the container is created. Without --mount, keep
+# what it has, so the guard still covers those directories.
+if [[ -n "$(container_state)" ]]; then
+	have="$(docker container inspect -f '{{index .Config.Labels "sandbox.mounts"}}' "$NAME")"
+	if [[ ${#MOUNTS[@]} -eq 0 ]]; then
+		MOUNTS=()
+		while IFS= read -r m; do
+			[[ -z "$m" ]] || MOUNTS+=("$m")
+		done <<<"$have"
+	elif [[ "$have" != "$MOUNTS_LABEL" ]]; then
+		die "$NAME was created with other mounts, run with --recreate"
+	fi
+fi
+
 if [[ $REBUILD -eq 1 ]] || ! docker image inspect sandbox-base >/dev/null 2>&1; then
 	echo "sb: building sandbox-base" >&2
 	docker build -t sandbox-base "$CONTAINERS/base"
@@ -269,6 +324,7 @@ case "$(container_state)" in
 		args=(
 			-d --name "$NAME" --hostname "$AGENT"
 			--label sandbox.agent="$AGENT" --label sandbox.project="$PROJECT"
+			--label sandbox.mounts="$MOUNTS_LABEL"
 			--user 0:0
 			--security-opt no-new-privileges
 			--cap-drop ALL --cap-add NET_ADMIN
@@ -298,12 +354,21 @@ case "$(container_state)" in
 		for e in ${AGENT_ENV[@]+"${AGENT_ENV[@]}"}; do
 			args+=(-e "$e")
 		done
-		# Working on this repo would otherwise expose every agent's stored
-		# credentials, so shadow home/ with an empty read-only tmpfs.
-		if [[ "$ROOT" == "$PROJECT" || "$ROOT" == "$PROJECT"/* ]]; then
-			rel="${ROOT#"$PROJECT"}"
-			args+=(--tmpfs "$CPROJECT${rel}/home:ro,size=1m")
-		fi
+		for m in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
+			ro=""
+			[[ "$m" == *:ro ]] && { m="${m%:ro}"; ro=":ro"; }
+			args+=(-v "$m:$(container_path "$m")$ro")
+		done
+		# A mount that contains this repo would otherwise expose every
+		# agent's stored credentials, so shadow home/ with an empty
+		# read-only tmpfs. Nested mounts see it once, at its mirrored path.
+		for m in "$PROJECT" ${MOUNTS[@]+"${MOUNTS[@]}"}; do
+			m="${m%:ro}"
+			if [[ "$ROOT" == "$m" || "$ROOT" == "$m"/* ]]; then
+				args+=(--tmpfs "$(container_path "$ROOT")/home:ro,size=1m")
+				break
+			fi
+		done
 		mkdir -p "$STATE_DIR"
 		write_gitconfig "$STATE_DIR/$NAME.gitconfig"
 		[[ -s "$STATE_DIR/$NAME.gitconfig" ]] &&
