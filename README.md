@@ -27,13 +27,22 @@ usage: sb <agent> [path] [options] [-- agent-args...]
 options:
   --rebuild    rebuild the agent image (implies --recreate)
   --recreate   remove this project's container and start a fresh one
+  --args ARGS  arguments for the agent, split like a shell command line
+               (repeatable), e.g. --args '--plugin-dir src/plugin'
   --stop       stop this project's container
   -h, --help   show this help
+
+Everything after -- is also passed to the agent, unchanged.
 ```
 
 - `path` defaults to the current directory.
-- Anything after `--` is appended to the agent command, e.g.
-  `sb claude -- --resume`. It only applies when the tmux session is first
+- `--args` passes arguments to the agent and can sit anywhere among the other
+  options, e.g. `sb claude --args '--plugin-dir src/plugin' --rebuild`. The
+  value is split by the shell in the container, so quote inside it as you
+  would on a command line: `--args '--append-system-prompt "be brief"'`.
+  It can be repeated; the values are joined in order.
+- Anything after `--` is appended to the agent command unchanged, e.g.
+  `sb claude -- --resume`. Agent args only apply when the tmux session is first
   created; if the session is already running, the args are ignored with a warning.
 - `sb list` shows all sandbox containers with their status and project path.
 
