@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# Starts claude after making sure the plugins below are installed. They land
+# in the persisted ~/.claude, so this only hits the network the first time.
+# A failed install is reported but never stops claude from starting.
+
+PLUGINS="egm@egm"
+MARKETPLACES="egm=google/elephant-goldfish-model"
+
+for m in $MARKETPLACES; do
+	name=${m%%=*}
+	claude plugin marketplace list 2>/dev/null | grep -qw -- "$name" ||
+		claude plugin marketplace add "${m#*=}" ||
+		echo "claude-start: could not add marketplace ${m#*=}" >&2
+done
+
+for p in $PLUGINS; do
+	claude plugin list 2>/dev/null | grep -qF -- "$p" ||
+		claude plugin install "$p" ||
+		echo "claude-start: could not install plugin $p" >&2
+done
+
+exec claude "$@"
