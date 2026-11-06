@@ -19,6 +19,10 @@
 
 set -euo pipefail
 
+# Bash reads a script as it runs it, so editing sb would break the runs in
+# progress. The braces make it parse the whole file first; see the end.
+{
+
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 CONTAINERS="$ROOT/containers"
 CUSER=agent
@@ -316,15 +320,15 @@ check_file_sharing() {
 	for f in "$HOME/Library/Group Containers/group.com.docker/settings-store.json" \
 		"$HOME/Library/Group Containers/group.com.docker/settings.json"; do
 		[[ -f "$f" ]] || continue
-		tr -d '\n' <"$f" | grep -oiE '"filesharingDirectories" *: *\[[^]]*\]' |
-			sed -E 's/^[^[]*\[//; s/\]$//' | tr ',' '\n' |
-			sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' |
-			while IFS= read -r d; do
 		# macOS privacy controls can hide another app's data from the terminal.
 		if [[ ! -r "$f" ]]; then
 			echo "sb: can't read Docker Desktop settings (macOS privacy); file sharing not checked." >&2
 			return 0
 		fi
+		tr -d '\n' <"$f" | grep -oiE '"filesharingDirectories" *: *\[[^]]*\]' |
+			sed -E 's/^[^[]*\[//; s/\]$//' | tr ',' '\n' |
+			sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' |
+			while IFS= read -r d; do
 				[[ -n "$d" ]] || continue
 				d="${d%/}"
 				if [[ "$HOST_HOME" == "$d" || "$HOST_HOME" == "$d"/* || -z "$d" ]]; then
@@ -564,3 +568,4 @@ DOCKER_CLI_HINTS=false docker exec -it --detach-keys 'ctrl-],ctrl-]' \
 [[ "$(container_state)" == running ]] || echo "sb: $NAME stopped while the $MODE was running" >&2
 guard_check
 exit "$rc"
+}
