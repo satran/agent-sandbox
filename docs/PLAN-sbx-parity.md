@@ -414,7 +414,7 @@ Apply the same pattern to the other agents' `CONFIG_MOUNTS` where it fits.
 
 - `sb doctor`: checks docker, its path, the VM's file sharing, the SSH
   include, the proxy image, the policy and Keychain secrets, and prints fixes.
-- Idle stop: `sb gc` stops sandboxes with no tmux client and no ssh session
+- Idle stop: `sb gc` stops sandboxes with no `SB_RUN`-tagged process and no ssh session
   for `SB_IDLE` minutes. Optionally a launchd agent installed by
   `sb gc --install`.
 - Kits: `containers/kits/<kit>.Dockerfile` fragments (`go`, `rust`, `java`,

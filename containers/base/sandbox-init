@@ -1,7 +1,8 @@
 #!/bin/sh
 #
-# PID 1 of a sandbox container. Installs the egress firewall as root, then
-# idles. The agent is attached separately with `docker exec --user agent`, so
+# Main process of a sandbox container, under docker-init (--init). Installs
+# the egress firewall as root, then idles. The agent is attached separately
+# with `docker exec --user agent`, so
 # it never holds the privileges used here and cannot undo these rules.
 #
 # Set SANDBOX_FIREWALL=off to skip the firewall (debugging only).

@@ -11,9 +11,10 @@ disabled without touching the rest of your machine.
 ln -s "$PWD/bin/sb" ~/.local/bin/sb
 
 cd ~/src/myproject
-sb claude       # build images if needed, start container, attach
-# ... work ...  C-b d to detach
-sb claude       # re-attach to the same session
+sb claude       # build images if needed, start container, run claude here
+# ... work ...  close the window or quit claude when done
+sb claude -- --continue   # pick the conversation up again
+sb shell claude # a bash in the same container, in another tab
 ```
 
 Requirements on the host: `bash`, `docker`, `shasum`.
@@ -22,6 +23,7 @@ Requirements on the host: `bash`, `docker`, `shasum`.
 
 ```
 usage: sb <agent> [path] [options] [-- agent-args...]
+       sb shell <agent> [path] [options]
        sb list
 
 options:
@@ -35,7 +37,9 @@ options:
   --stop       stop this project's container
   -h, --help   show this help
 
-Everything after -- is also passed to the agent, unchanged.
+Everything after -- is also passed to the agent, unchanged. Closing the
+window ends the agent; resume with its own flag, e.g. sb claude -- --continue.
+sb shell opens a bash as the agent user in the project instead.
 ```
 
 - `path` defaults to the current directory.
@@ -45,8 +49,18 @@ Everything after -- is also passed to the agent, unchanged.
   would on a command line: `--args '--append-system-prompt "be brief"'`.
   It can be repeated; the values are joined in order.
 - Anything after `--` is appended to the agent command unchanged, e.g.
-  `sb claude -- --resume`. Agent args only apply when the tmux session is first
-  created; if the session is already running, the args are ignored with a warning.
+  `sb claude -- --resume`.
+- The agent runs directly in your terminal, with no tmux in between, and
+  closing the window ends it. To carry on, start it again with its resume
+  flag (see the [Agents](#agents) table), e.g. `sb claude -- --continue`.
+  Running `sb` again while the agent is still running starts a second one
+  next to it, as running it twice on the host would; `antigravity` refuses
+  that, because both would use the same keyring.
+- `sb shell <agent> [path]` opens a bash in the same container, as `agent`,
+  in the project. It takes the same options except `--args` and `--`. Do not
+  use a plain `docker exec` instead: it runs as root, which can turn the
+  firewall off.
+- `sb` needs an interactive terminal; it fails if stdin or stdout is not one.
 - `--mount DIR` mounts another directory, e.g. a sibling repo or a shared
   library, at the same mirrored path as the project (see
   [How it works](#how-it-works)); add `:ro` to make it read-only:
@@ -86,9 +100,10 @@ For `sb <agent> <path>`:
    `sandbox-<agent>` from `containers/<agent>`. Each is built only if missing,
    or always with `--rebuild` (the layer cache keeps that fast).
 4. **Container.** It is named `sandbox-<agent>-<path-slug>-<6-char sha1 of path>`
-   and labelled `sandbox.agent` / `sandbox.project`. It runs `sandbox-init`, which
+   and labelled `sandbox.agent` / `sandbox.project`. It runs `sandbox-init`
+   under Docker's `--init` (which reaps finished processes); `sandbox-init`
    installs the egress firewall and then idles, so the container stays alive
-   between sessions; a stopped container is restarted. The mounts are:
+   between sessions. A stopped container is restarted. The mounts are:
    - the project directory (read-write)
    - each `--mount` directory, read-write or read-only (also recorded in the
      `sandbox.mounts` label)
@@ -97,15 +112,27 @@ For `sb <agent> <path>`:
      [Isolation](#isolation))
    - an empty read-only tmpfs over this repo's `home/`, if the project or a
      `--mount` contains it
+   - `containers/tmux.conf`, read-only, only so that containers created before
+     tmux was dropped still start; it goes away in a later change
 
    Environment: `PATH`, `HOME`, `USER`, `COLORTERM=truecolor`, plus `AGENT_ENV`.
-5. **Attach.** `docker exec --user agent` attaches to a tmux session named `sandbox`:
-   - window 1 (named after the agent) runs `AGENT_CMD`, and drops to bash when the agent exits
-   - window 2 (`shell`) is a plain shell in the project
+5. **Run.** `docker exec -it --user agent` runs `AGENT_CMD` (or bash, for
+   `sb shell`) in the project, attached to your terminal. Only the terminal
+   variables listed under [Isolation](#isolation) are passed in. Ctrl-P
+   reaches the agent: Docker's detach keys are set to `ctrl-],ctrl-]`.
+   - Every run is tagged with `SB_RUN=<mode>.<sb pid>.<random>`, which its
+     processes inherit. `docker exec` does not end a process when its client
+     goes away, so when the window closes or the agent exits, `sb` hangs up
+     every process with its tag and kills what is left after two seconds.
+   - If `sb` itself was killed before it could do that, the next `sb` for
+     that container finds tags whose `sb` is gone and ends those runs.
+   - A container from before this change that still runs a tmux session is
+     refused, with the command to attach to it or stop it.
 
-   Before attaching and again after you detach, `sb` checks the project and
-   writable `--mount` directories for
-   changed host-executed files (see [Isolation](#isolation)).
+   Before the run and again after it ends, `sb` checks the project and
+   writable `--mount` directories for changed host-executed files (see
+   [Isolation](#isolation)). When the window is closed, the second check is
+   skipped, so the warning appears at the next `sb` instead of being lost.
 
 ## Isolation
 
@@ -130,6 +157,12 @@ only thing standing between it and your machine:
 - **Its own network.** Sandboxes share a `sandbox` bridge with inter-container
   communication disabled, and use public resolvers rather than the host's, so
   one sandbox cannot reach another.
+- **Only terminal variables come in.** A run gets `TERM=xterm-256color`,
+  `LANG=C.UTF-8`, `SB_RUN`, and the host's `TERM_PROGRAM`,
+  `TERM_PROGRAM_VERSION`, `LC_TERMINAL` and `LC_TERMINAL_VERSION`, on top of what the container was created with.
+  The rest of your environment, with its tokens and agent sockets, stays on
+  the host. With no tmux in between, the agent's output (including anything it
+  fetched from the web) goes to your terminal as is, so keep iTerm up to date.
 - **Resource limits.** 2048 processes, no core dumps, and optional memory and
   CPU caps, so a runaway agent cannot take the host down.
 - **Nothing privileged is mounted.** No docker socket, no SSH agent, no host
@@ -144,16 +177,20 @@ only thing standing between it and your machine:
   `http.*.extraheader` or `credential.*` stay on the host. The copy is
   regenerated when the container is created, so use `--recreate` after
   changing your git config.
+- **Every `sb` command runs as `agent`.** The agent, `sb shell` and the
+  readiness check all pass `--user agent`, and there is no option to choose
+  another user.
 - **Warnings about host-executed files.** The agent can write files that the
   *host* later runs: `.git/hooks/*`, `.git/config` (`core.fsmonitor`,
   `core.hooksPath`, filter drivers), `.envrc` and `.vscode/*.json`. Your next
   `git status` or editor open would run them outside the sandbox. `sb` hashes
   these (in the project, writable `--mount` directories and nested repos up
   to 4 levels deep, skipping
-  `node_modules` and `.venv`) when you attach and when you detach, and
+  `node_modules` and `.venv`) when a run starts and when it ends, and
   prints a warning listing any that changed. It only warns; nothing is
-  blocked. Changes made while you are detached are reported at the next
-  attach, so run `sb` again before you run git on the host. Snapshots are in
+  blocked. Changes made while no run was watching (another run was still
+  going, or the window was closed) are reported at the next run, so run `sb`
+  again before you run git on the host. Snapshots are in
   `home/.sb/`.
 - **Docker Desktop file sharing.** On macOS, Docker Desktop's VM can see every
   directory under Settings > Resources > File sharing, which defaults to all
@@ -200,14 +237,14 @@ Agent Dockerfiles only add the agent itself.
 
 ### Agents
 
-| agent      | `sandbox.conf` | runnable with `bin/sb` |
-|------------|----------------|-----------------------------|
-| `antigravity` | yes         | yes                         |
-| `claude`   | yes            | yes                         |
-| `omp`      | yes            | yes                         |
-| `opencode` | yes            | yes                         |
-| `sandbox`  | no             | no, plain dev box           |
-| `cliproxy` | —              | empty placeholder           |
+| agent      | `sandbox.conf` | runnable with `bin/sb` | resume with |
+|------------|----------------|------------------------|-------------|
+| `antigravity` | yes         | yes, one run at a time | `-- --continue`, `-- --conversation <id>` |
+| `claude`   | yes            | yes                    | `-- --continue`, `-- --resume` |
+| `omp`      | yes            | yes                    | `-- --continue`, `-- --resume` |
+| `opencode` | yes            | yes                    | `-- --continue`, `-- --session <id>` |
+| `sandbox`  | no             | no, plain dev box      | |
+| `cliproxy` | —              | empty placeholder      | |
 
 ## Adding an agent
 
@@ -232,7 +269,11 @@ Agent Dockerfiles only add the agent itself.
    CONFIG_MOUNTS=("home/<name>/.<name>:/home/agent/.<name>")
    AGENT_ENV=(SOME_VAR=value)
    AGENT_CMD=(<name> --some-flag)   # required
+   AGENT_SINGLE_RUN=1               # optional: refuse a second run per container
    ```
+
+   `CONFIG_MOUNTS` must include where the agent keeps its conversations, or
+   its resume flag won't find them after `--recreate`.
 
 3. Run `sb <name> --rebuild`.
 
@@ -242,6 +283,13 @@ Agent Dockerfiles only add the agent itself.
   `containers/base/Dockerfile`.
 - Containers created before the hardening keep their old, permissive settings.
   `sb` refuses to attach to them; fix it with `--recreate`.
+- Containers created before `--init` was added do not reap finished
+  processes, so zombies pile up toward the process limit. Fix it with
+  `--recreate`.
+- Some things the agent does on the host cannot work in the container,
+  with or without tmux: pasting an image from the Mac clipboard, dragging
+  Mac files in (their paths differ in the container), opening a browser,
+  AppleScript, and Claude Code's `/terminal-setup`.
 - `ping` and other raw sockets do not work, because `NET_RAW` is dropped.
 - The firewall blocks whole network ranges, not domains, so the agent can still
   talk to any public host. See [Isolation](#isolation) for what that means.

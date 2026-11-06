@@ -6,10 +6,13 @@ tool does and how to use it.
 ## What's here
 
 - `bin/sb` is a single bash script that runs an agent in a per-project
-  docker container attached to tmux.
+  docker container, attached to the user's terminal with `docker exec -it`.
+  Closing the window ends the agent; `sb` kills each run's processes by
+  their `SB_RUN` tag. `sb shell` opens a bash there instead.
 - `containers/base/Dockerfile` builds the `sandbox-base` image. Every agent image is
   `FROM sandbox-base`, and `bin/sb` builds base automatically.
-- `containers/base/sandbox-init` is the container's PID 1. It runs as root,
+- `containers/base/sandbox-init` is the container's main process (under
+  docker's `--init`). It runs as root,
   installs the egress firewall, then idles. The agent is attached with
   `docker exec --user agent` and never has those privileges.
 - `containers/<agent>/` contains a `Dockerfile` and a `sandbox.conf`. Only directories that
@@ -30,10 +33,14 @@ tool does and how to use it.
   `containers/base/Dockerfile`. Do not add `sudo` back, and do not add
   capabilities or mounts to `bin/sb` without being asked.
 - `sandbox.conf` is sourced as bash and may set:
-  - `AGENT_CMD`, an array, **required**: the command run in tmux window 1
+  - `AGENT_CMD`, an array, **required**: the command `sb` runs
   - `CONFIG_MOUNTS`, an array of `"host:container"`; host is relative to the repo
     root, usually `home/<agent>/...`
   - `AGENT_ENV`, an array of `KEY=VALUE`
+  - `AGENT_SINGLE_RUN=1` to refuse a second run in the same container
+- `CONFIG_MOUNTS` must include where the agent stores its conversations, so
+  its resume flag still works after `--recreate`. Add the flag to the
+  "resume with" column of the Agents table in README.md.
 - The agent binary must be on the container PATH set in `bin/sb` (`CPATH`).
 - Reference implementation: `containers/claude/`.
 
@@ -49,6 +56,8 @@ tool does and how to use it.
 - Don't weaken the guard that refuses to mount `$HOME` or `/`, the tmpfs that
   hides `home/` when the project contains this repo, or the `--cap-drop` /
   `no-new-privileges` / firewall settings.
+- Every `docker exec` must pass `--user "$CUSER"`: the container runs as root
+  for the firewall. Only the listed terminal variables may be passed to it.
 
 ## Testing
 
@@ -56,10 +65,15 @@ Docker may not be available inside a sandbox. When it is:
 
 ```sh
 docker rmi sandbox-base sandbox-claude   # optional: force a cold build
-bin/sb claude /tmp/sbx-test              # builds base, then claude; attaches
+bin/sb claude /tmp/sbx-test              # builds base, then claude; runs it
+bin/sb shell claude /tmp/sbx-test        # bash in the same container
 bin/sb list
 bin/sb claude /tmp/sbx-test --stop
 ```
+
+`sb` needs a terminal. To test it without one, run it under a pty (e.g.
+python's `pty.fork`) and close the pty to simulate closing the window; `ps` in
+the container should then show nothing tagged `SB_RUN` left.
 
 After changing anything security related, check from inside the sandbox that
 `id` shows no groups, `sudo` is absent, `curl -m 5 http://192.168.1.1` and

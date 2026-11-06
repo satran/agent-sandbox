@@ -134,19 +134,26 @@ for a weaker sandbox.
 
 ## Open Questions
 
-*   **Does a `docker exec` process survive its client going away?** Most
-    reports say yes: the agent keeps running when the window closes. This
-    decides whether `sb` must kill the agent itself. It has to be checked on
-    the user's Docker Desktop before the cleanup work starts.
-*   **What `TERM` does `docker exec -t` give by default?** If it is `xterm`,
-    `sb` must always pass `TERM` from the host.
-*   **Does Antigravity (`agy`) have a resume flag?** If not, closing an
-    Antigravity window loses the conversation. Check `agy --help` in the image.
-*   **What is omp's resume flag?** It is probably `--continue` or `--resume`.
-    Check `omp --help` in the image.
-*   **Does the window size arrive at exec start, or only after the first
-    resize?** If only after, the agent's first screen is drawn at the wrong
-    size. This needs a test, and possibly a minimum Docker Desktop version.
+All answered on Docker Desktop 29.9.2 on 2026-11-06, with `docker exec`
+under a pty in a throwaway container:
+
+*   **Does a `docker exec` process survive its client going away?** Yes.
+    After the client was killed with SIGHUP, the exec'd process kept running
+    with no terminal attached. `sb` must end the run itself.
+*   **What `TERM` does `docker exec -t` give by default?** `xterm`, so `sb`
+    always passes `TERM=xterm-256color`. `LANG` is empty and `C.utf8` is the only
+    locale in the image, so `sb` passes `LANG=C.UTF-8`.
+*   **Does Antigravity (`agy`) have a resume flag?** Yes: `--continue` (`-c`)
+    for the most recent conversation, `--conversation <id>` for a given one.
+*   **What is omp's resume flag?** `--continue` (`-c`), or `--resume[=<id>]`
+    for a picker or a given session. opencode has `--continue` (`-c`) and
+    `--session <id>`.
+*   **Does the window size arrive at exec start?** Yes. `stty size` printed
+    the pty's size (40x123) as the first thing in the exec, before any
+    resize.
+
+Docker Desktop also prints a "What's next" hint after an exec ends; `sb`
+sets `DOCKER_CLI_HINTS=false` to keep it out of the window.
 
 <!-- Sections below are added in later steps. -->
 

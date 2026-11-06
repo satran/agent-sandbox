@@ -3,12 +3,13 @@
 # sb - run a coding agent inside a per-project docker container.
 #
 #   sb <agent> [path] [options] [-- agent-args...]
+#   sb shell <agent> [path] [options]
 #   sb list
 #
 # Each (agent, project) pair gets its own long-lived container. The project is
-# mounted at the same path relative to $HOME inside the container, and you are
-# attached to a tmux session running the agent. Detach with C-b d; running
-# sb again re-attaches.
+# mounted at the same path relative to $HOME inside the container, and the
+# agent runs in your terminal via `docker exec`. Closing the window ends it;
+# resume with the agent's own flag, e.g. `sb claude -- --continue`.
 #
 # Agents are defined by containers/<agent>/{Dockerfile,sandbox.conf}.
 #
@@ -36,6 +37,7 @@ SB_FIREWALL="${SB_FIREWALL:-}"
 usage() {
 	cat <<EOF
 usage: sb <agent> [path] [options] [-- agent-args...]
+       sb shell <agent> [path] [options]
        sb list
 
 options:
@@ -49,7 +51,9 @@ options:
   --stop       stop this project's container
   -h, --help   show this help
 
-Everything after -- is also passed to the agent, unchanged.
+Everything after -- is also passed to the agent, unchanged. Closing the
+window ends the agent; resume with its own flag, e.g. sb claude -- --continue.
+sb shell opens a bash as the agent user in the project instead.
 
 environment (applied when the container is created):
   SB_MEMORY, SB_CPUS, SB_PIDS   resource limits (default: pids $SB_PIDS)
@@ -72,6 +76,13 @@ case "$1" in
 			--format 'table {{.Names}}\t{{.Status}}\t{{.Label "sandbox.project"}}'
 		exit 0 ;;
 esac
+
+# "shell" opens a bash in the container instead of the agent.
+MODE=agent
+if [[ "$1" == shell ]]; then
+	MODE=shell; shift
+	[[ $# -gt 0 ]] || die "usage: sb shell <agent> [path] [options]"
+fi
 
 AGENT="$1"; shift
 AGENT_DIR="$CONTAINERS/$AGENT"
@@ -108,11 +119,16 @@ while [[ $# -gt 0 ]]; do
 	shift
 done
 
+[[ $MODE == agent || ( -z "$ARGS_STR" && ${#AGENT_ARGS[@]} -eq 0 ) ]] ||
+	die "sb shell takes no agent arguments"
+
 # Per-agent settings. CONFIG_MOUNTS are "host:container" with host relative to
-# the repo root; AGENT_CMD is what runs in the first tmux window.
+# the repo root; AGENT_CMD is what sb runs; AGENT_SINGLE_RUN=1 refuses a
+# second run of the agent in the same container.
 CONFIG_MOUNTS=()
 AGENT_ENV=()
 AGENT_CMD=()
+AGENT_SINGLE_RUN=0
 # shellcheck source=/dev/null
 source "$AGENT_DIR/sandbox.conf"
 [[ ${#AGENT_CMD[@]} -gt 0 ]] || die "$AGENT_DIR/sandbox.conf does not set AGENT_CMD"
@@ -278,6 +294,8 @@ if [[ $STOP -eq 1 ]]; then
 	exit 0
 fi
 
+[[ -t 0 && -t 1 ]] || die "needs an interactive terminal"
+
 if [[ $RECREATE -eq 1 && -n "$(container_state)" ]]; then
 	echo "sb: removing $NAME" >&2
 	docker rm -f "$NAME" >/dev/null
@@ -325,7 +343,7 @@ case "$(container_state)" in
 			-d --name "$NAME" --hostname "$AGENT"
 			--label sandbox.agent="$AGENT" --label sandbox.project="$PROJECT"
 			--label sandbox.mounts="$MOUNTS_LABEL"
-			--user 0:0
+			--user 0:0 --init
 			--security-opt no-new-privileges
 			--cap-drop ALL --cap-add NET_ADMIN
 			--network "$NETWORK"
@@ -337,6 +355,8 @@ case "$(container_state)" in
 			-e HOME="$CHOME" -e USER="$CUSER"
 			-e SANDBOX_HOST="$(hostname -s)" -e SANDBOX_PROJECT="${PROJECT/#"$HOST_HOME"/\~}"
 			-v "$PROJECT:$CPROJECT" -w "$CPROJECT"
+			# Kept so containers created before tmux was dropped still
+			# start; removed together with tmux.conf.
 			-v "$CONTAINERS/tmux.conf:$CHOME/.tmux.conf:ro"
 		)
 		for d in $SB_DNS; do
@@ -400,25 +420,116 @@ if ! wait_ready; then
 	die "sandbox $NAME did not come up"
 fi
 
-# The agent keeps running while detached, so check on the way in and out.
+# Containers from before sb dropped tmux may still run an agent in it, which
+# nobody would see. Make the user deal with it rather than start a second one.
+if docker exec --user "$CUSER" "$NAME" sh -c 'command -v tmux >/dev/null && tmux has-session' 2>/dev/null; then
+	{
+		echo "sb: $NAME still runs a tmux session from an older sb. Finish it with"
+		echo "sb:   docker exec -it --user $CUSER $NAME tmux attach"
+		echo "sb: or stop the container with: sb $AGENT $PROJECT --stop"
+	} >&2
+	exit 1
+fi
+
+# Every run is tagged SB_RUN=<mode>.<host pid of sb>.<random>. Its processes,
+# daemons included, inherit the tag, which is how sb finds them again.
+RUN_ID="$MODE.$$.$RANDOM$RANDOM"
+
+# Prints the tag of every tagged run in the container.
+run_tags() {
+	docker exec --user "$CUSER" "$NAME" sh -c '
+		for p in /proc/[0-9]*; do
+			tr "\0" "\n" 2>/dev/null <"$p/environ" | sed -n "s/^SB_RUN=//p"
+		done' 2>/dev/null | sort -u || true
+}
+
+# Hangs up every process of the given runs, then kills what is left.
+kill_runs() {
+	[[ $# -gt 0 ]] || return 0
+	docker exec --user "$CUSER" "$NAME" sh -c '
+		pids() {
+			for p in /proc/[0-9]*; do
+				t=$(tr "\0" "\n" 2>/dev/null <"$p/environ" | sed -n "s/^SB_RUN=//p")
+				case " $runs " in *" $t "*) [ -n "$t" ] && echo "${p#/proc/}" ;; esac
+			done
+		}
+		runs="$*"
+		p=$(pids)
+		[ -n "$p" ] || exit 0
+		kill -HUP $p 2>/dev/null
+		for i in 1 2 3 4 5 6 7 8 9 10; do
+			sleep 0.2
+			p=$(pids)
+			[ -n "$p" ] || exit 0
+		done
+		kill -KILL $p 2>/dev/null
+		true' _ "$@"
+}
+
+# A run is alive while the sb that started it is.
+run_alive() {
+	local pid="${1#*.}"
+	pid="${pid%%.*}"
+	ps -p "$pid" -o command= 2>/dev/null | grep -qE '(^|[ /])sb( |$)'
+}
+
+# docker exec does not end its process when the client goes away, so a
+# window closed while sb could not clean up leaves the run behind.
+stale=() agents=0
+while IFS= read -r t; do
+	[[ -n "$t" ]] || continue
+	if ! run_alive "$t"; then
+		stale+=("$t")
+	elif [[ "$t" == agent.* ]]; then
+		agents=$((agents + 1))
+	fi
+done < <(run_tags)
+if [[ ${#stale[@]} -gt 0 ]]; then
+	echo "sb: stopping ${#stale[@]} run(s) left behind by a closed window" >&2
+	kill_runs "${stale[@]}" || true
+fi
+if [[ $MODE == agent && $agents -gt 0 ]]; then
+	[[ $AGENT_SINGLE_RUN -eq 0 ]] ||
+		die "$AGENT is already running in $NAME; close it first"
+	echo "sb: $AGENT is already running in this container; starting another" >&2
+fi
+
+# Only these describe the terminal; the rest of the host environment stays
+# out, it may hold tokens and agent sockets. TERM is fixed, so it always has
+# a terminfo entry in the container.
+EXEC_ENV=(-e "SB_RUN=$RUN_ID" -e TERM=xterm-256color -e LANG=C.UTF-8)
+for v in TERM_PROGRAM TERM_PROGRAM_VERSION LC_TERMINAL LC_TERMINAL_VERSION; do
+	[[ -z "${!v:-}" ]] || EXEC_ENV+=(-e "$v=${!v}")
+done
+
+if [[ $MODE == shell ]]; then
+	cmd="bash -l"
+	prep=""
+else
+	cmd="$(printf '%q ' "${AGENT_CMD[@]}")$ARGS_STR"
+	[[ ${#AGENT_ARGS[@]} -eq 0 ]] || cmd+=" $(printf '%q ' "${AGENT_ARGS[@]}")"
+	# No shell sits above the agent, so a suspended agent freezes the window.
+	prep="stty susp undef 2>/dev/null"
+fi
+
+# Changes made while no sb was watching show up here.
 guard_check
 
-# Build the agent command line; when the agent exits, the window drops to bash.
-cmd="$(printf '%q ' "${AGENT_CMD[@]}")$ARGS_STR"
-[[ ${#AGENT_ARGS[@]} -eq 0 ]] || cmd+=" $(printf '%q ' "${AGENT_ARGS[@]}")"
+# Closing the window hangs up sb and the docker client, but not the run in
+# the container, so end it here. The guard is not re-checked then: nobody
+# would see the warning, and saving the snapshot would hide it for good.
+trap 'kill_runs "$RUN_ID" >/dev/null 2>&1 || true' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 rc=0
-docker exec -it --user "$CUSER" "$NAME" bash -c '
-	set -e
-	if ! command -v tmux >/dev/null; then
-		echo "sb: tmux is not installed in this image" >&2; exit 1
-	fi
-	if ! tmux has-session -t sandbox 2>/dev/null; then
-		tmux new-session -d -s sandbox -n "$1" -c "$2" "$3; exec bash"
-		tmux new-window -d -t sandbox -n shell -c "$2"
-	elif [ -n "$4" ]; then
-		echo "sb: session already running, ignoring agent args" >&2
-	fi
-	exec tmux attach -t sandbox
-' _ "$AGENT" "$CPROJECT" "$cmd" "$ARGS_STR${AGENT_ARGS[*]-}" || rc=$?
+# Docker holds back ctrl-p as the start of its detach keys; use keys nobody
+# types instead, since detaching would only leave the run behind.
+DOCKER_CLI_HINTS=false docker exec -it --detach-keys 'ctrl-],ctrl-]' \
+	--user "$CUSER" -w "$CPROJECT" "${EXEC_ENV[@]}" "$NAME" sh -c '
+	eval "$1"
+	eval "exec $2"' _ "$prep" "$cmd" || rc=$?
+[[ "$(container_state)" == running ]] || echo "sb: $NAME stopped while the $MODE was running" >&2
 guard_check
 exit "$rc"
