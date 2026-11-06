@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
 	ranger \
 	iptables \
 	iproute2 \
+	socat \
 	dbus \
 	gnome-keyring \
 	&& rm -rf /var/lib/apt/lists/*

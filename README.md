@@ -85,6 +85,31 @@ them together with `--recreate`:
 | `SB_DNS` | `1.1.1.1 8.8.8.8` | resolvers; must be reachable, i.e. not on your LAN |
 | `SB_BLOCKED_NETS` | see [Isolation](#isolation) | networks to deny egress to |
 | `SB_FIREWALL` | `on` | `off` disables the egress firewall (debugging only) |
+| `SB_HOST_PORTS` | unset | host loopback ports the sandbox may reach, e.g. `47821`; see below |
+
+A container keeps the `SB_HOST_PORTS` it was created with. Later runs without
+it keep them; a different set is refused until you add `--recreate`, and
+`--recreate` without it drops them.
+
+### Reaching a server on the host
+
+Some host apps, such as an editor with an MCP server, listen only on
+`127.0.0.1`. With `SB_HOST_PORTS=47821`, `sb` relays `127.0.0.1:47821` inside
+the container to port 47821 on the host, so an agent uses the same URL as on
+the host. Register the server once per agent from `sb shell <agent>`; it is
+saved with the agent's config under `home/<agent>/`:
+
+```sh
+SB_HOST_PORTS=47821 sb shell claude ~/src/app --recreate
+claude mcp add --transport http mdedit http://127.0.0.1:47821/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+This works with Docker Desktop, which forwards `host.docker.internal` to the
+host's loopback. On Linux, `host.docker.internal` is the docker bridge, so the
+host app must also listen there. The image needs `socat`: run once with
+`--rebuild` if the base image predates it. Read
+[Isolation](#isolation) before you open a port.
 
 ## How it works
 
@@ -118,6 +143,9 @@ For `sb <agent> <path>`:
      `--mount` contains it
 
    Environment: `PATH`, `HOME`, `USER`, `COLORTERM=truecolor`, plus `AGENT_ENV`.
+   With `SB_HOST_PORTS`, the container also gets a `host.docker.internal`
+   entry and the ports in `SANDBOX_HOST_PORTS` and the `sandbox.host-ports`
+   label.
 5. **Run.** `docker exec -it --user agent` runs `AGENT_CMD` (or bash, for
    `sb shell`) in the project, attached to your terminal. Only the terminal
    variables listed under [Isolation](#isolation) are passed in. Ctrl-P
@@ -128,6 +156,10 @@ For `sb <agent> <path>`:
      every process with its tag and kills what is left after two seconds.
    - If `sb` itself was killed before it could do that, the next `sb` for
      that container finds tags whose `sb` is gone and ends those runs.
+   - With `SB_HOST_PORTS`, before each run `sb` starts a `socat` (as
+     `agent`) for each port, listening on `127.0.0.1` in the container and
+     forwarding to `host.docker.internal`. One left from an earlier run keeps
+     the port, and the new one exits.
    - A container created when `sb` still used tmux is refused before it is
      started, with how to reach an agent that may still run in it; run with
      `--recreate` to replace it.
@@ -154,7 +186,11 @@ only thing standing between it and your machine:
   instance metadata), `100.64.0.0/10` and `192.0.0.0/24`. That blocks your
   router, the docker host and anything you have listening on localhost or a LAN
   address, while leaving the public internet, DNS and `git`/`npm`/`pip`
-  working. IPv6 is disabled by sysctl and dropped by ip6tables. Inbound is
+  working. The only exception is `SB_HOST_PORTS` (TCP to those ports on
+  `host.docker.internal`), which you opt into per container: whatever listens
+  there is reachable by the agent with your privileges, so open only servers
+  whose tools you would let the agent use, and note that an agent given a
+  token for one can read it. IPv6 is disabled by sysctl and dropped by ip6tables. Inbound is
   limited to established connections and the bridge, so published ports still
   work.
 - **Its own network.** Sandboxes share a `sandbox` bridge with inter-container

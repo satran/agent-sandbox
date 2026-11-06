@@ -33,6 +33,20 @@ BLOCKED_NETS="${SANDBOX_BLOCKED_NETS:-\
 warn() { echo "sandbox-init: $*" >&2; }
 die() { warn "$*"; exit 1; }
 
+# Host ports bin/sb relays in (SB_HOST_PORTS). Only TCP to these ports on
+# host.docker.internal is let through; the rest of the host stays blocked.
+HOST_PORTS="${SANDBOX_HOST_PORTS:-}"
+HOST_IP=""
+if [ -n "$HOST_PORTS" ]; then
+	for port in $HOST_PORTS; do
+		case "$port" in
+			''|*[!0-9]*) die "bad port in SANDBOX_HOST_PORTS: $port" ;;
+		esac
+	done
+	HOST_IP="$(getent ahostsv4 host.docker.internal | awk 'NR == 1 {print $1}')"
+	[ -n "$HOST_IP" ] || die "host.docker.internal does not resolve"
+fi
+
 # Subnets reachable over our own link, i.e. the bridge the host talks to us on.
 link_subnets() {
 	ip -4 route show scope link 2>/dev/null | awk '{print $1}'
@@ -54,6 +68,9 @@ apply_firewall() {
 	iptables -A OUTPUT -o lo -j ACCEPT
 	# Replies on connections we already accepted, before the rejects below.
 	iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+	for port in $HOST_PORTS; do
+		iptables -A OUTPUT -d "$HOST_IP" -p tcp --dport "$port" -j ACCEPT
+	done
 	for net in $BLOCKED_NETS; do
 		iptables -A OUTPUT -d "$net" -j REJECT --reject-with icmp-net-unreachable
 	done
@@ -81,6 +98,7 @@ else
 	apply_firewall
 	block_ipv6
 	echo "sandbox-init: egress blocked to $BLOCKED_NETS"
+	[ -z "$HOST_PORTS" ] || echo "sandbox-init: except tcp to $HOST_IP ports $HOST_PORTS"
 fi
 
 awk '{print $22}' /proc/1/stat > "$READY"
