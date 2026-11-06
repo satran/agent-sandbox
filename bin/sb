@@ -538,25 +538,13 @@ else
 	prep="stty susp undef 2>/dev/null"
 fi
 
-# iTerm shows a badge in the window, so tabs that all run "claude" can be
-# told apart. Written to the host terminal, before and after the run.
-badge() {
-	[[ "${LC_TERMINAL:-}" == iTerm2 || "${TERM_PROGRAM:-}" == iTerm.app ]] || return 0
-	{ printf '\033]1337;SetBadgeFormat=%s\a' "$(printf '%s' "$1" | base64 | tr -d '\n')"; } 2>/dev/null || true
-}
-if [[ $MODE == shell ]]; then
-	badge "shell: $AGENT"$'\n'"$(basename "$PROJECT")"
-else
-	badge "$AGENT"$'\n'"$(basename "$PROJECT")"
-fi
-
 # Changes made while no sb was watching show up here.
 guard_check
 
 # Closing the window hangs up sb and the docker client, but not the run in
 # the container, so end it here. The guard is not re-checked then: nobody
 # would see the warning, and saving the snapshot would hide it for good.
-trap 'kill_runs "$RUN_ID" >/dev/null 2>&1 || true; badge ""' EXIT
+trap 'kill_runs "$RUN_ID" >/dev/null 2>&1 || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM

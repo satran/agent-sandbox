@@ -129,9 +129,6 @@ For `sb <agent> <path>`:
      started, with how to reach an agent that may still run in it; run with
      `--recreate` to replace it.
 
-   In iTerm, `sb` also sets the window's badge to the agent and project
-   (`shell: <agent>` for `sb shell`) and clears it when the run ends.
-
    Before the run and again after it ends, `sb` checks the project and
    writable `--mount` directories for changed host-executed files (see
    [Isolation](#isolation)). When the window is closed, the second check is
@@ -165,7 +162,7 @@ only thing standing between it and your machine:
   `TERM_PROGRAM_VERSION`, `LC_TERMINAL` and `LC_TERMINAL_VERSION`, on top of what the container was created with.
   The rest of your environment, with its tokens and agent sockets, stays on
   the host. With no tmux in between, the agent's output (including anything it
-  fetched from the web) goes to your terminal as is, so keep iTerm up to date.
+  fetched from the web) goes to your terminal as is, so keep your terminal up to date.
 - **Resource limits.** 2048 processes, no core dumps, and optional memory and
   CPU caps, so a runaway agent cannot take the host down.
 - **Nothing privileged is mounted.** No docker socket, no SSH agent, no host
