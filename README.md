@@ -1,6 +1,6 @@
 # agents
 
-Run coding agents (Claude Code, Antigravity CLI, …) inside throwaway-but-persistent
+Run coding agents (Claude Code, Codex, Antigravity CLI, …) inside throwaway-but-persistent
 docker containers, one per agent and project, so they can run with permissions
 disabled without touching the rest of your machine.
 
@@ -68,6 +68,9 @@ sb shell opens a bash as the agent user in the project instead.
   when the container is created. Later runs without `--mount` keep them;
   passing a different set is refused until you add `--recreate`, and
   `--recreate` without `--mount` drops them.
+- To log in to `codex`, use `sb codex -- login --device-auth` (or an API
+  key). Its default browser login waits for a callback on localhost, which
+  the browser on the host cannot reach.
 - `sb list` shows all sandbox containers with their status, project path and
   how many agents and `sb shell`s are running in each.
 
@@ -241,6 +244,7 @@ Agent Dockerfiles only add the agent itself.
 |------------|----------------|------------------------|-------------|
 | `antigravity` | yes         | yes, one run at a time | `-- --continue`, `-- --conversation <id>` |
 | `claude`   | yes            | yes                    | `-- --continue`, `-- --resume` |
+| `codex`    | yes            | yes                    | `-- resume --last`, `-- resume <id>` |
 | `omp`      | yes            | yes                    | `-- --continue`, `-- --resume` |
 | `opencode` | yes            | yes                    | `-- --continue`, `-- --session <id>` |
 | `sandbox`  | no             | no, plain dev box      | |
