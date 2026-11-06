@@ -25,7 +25,7 @@ tool does and how to use it.
 ## Adding or changing an agent
 
 - Dockerfile: start with `FROM sandbox-base` and add only the agent install. Base
-  already has the user `agent`, tmux, git, python3, node/npm, iptables and
+  already has the user `agent`, git, python3, node/npm, iptables and
   `~/.local/bin` on PATH. Put shared tooling in `containers/base`, not in an agent
   image. If you install as root, switch back with `USER agent`.
 - There is no sudo in the image and the runtime drops all capabilities, so an

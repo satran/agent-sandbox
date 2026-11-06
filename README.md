@@ -68,7 +68,8 @@ sb shell opens a bash as the agent user in the project instead.
   when the container is created. Later runs without `--mount` keep them;
   passing a different set is refused until you add `--recreate`, and
   `--recreate` without `--mount` drops them.
-- `sb list` shows all sandbox containers with their status and project path.
+- `sb list` shows all sandbox containers with their status, project path and
+  how many agents and `sb shell`s are running in each.
 
 These environment variables are read when a container is **created**, so change
 them together with `--recreate`:
@@ -112,8 +113,6 @@ For `sb <agent> <path>`:
      [Isolation](#isolation))
    - an empty read-only tmpfs over this repo's `home/`, if the project or a
      `--mount` contains it
-   - `containers/tmux.conf`, read-only, only so that containers created before
-     tmux was dropped still start; it goes away in a later change
 
    Environment: `PATH`, `HOME`, `USER`, `COLORTERM=truecolor`, plus `AGENT_ENV`.
 5. **Run.** `docker exec -it --user agent` runs `AGENT_CMD` (or bash, for
@@ -126,8 +125,12 @@ For `sb <agent> <path>`:
      every process with its tag and kills what is left after two seconds.
    - If `sb` itself was killed before it could do that, the next `sb` for
      that container finds tags whose `sb` is gone and ends those runs.
-   - A container from before this change that still runs a tmux session is
-     refused, with the command to attach to it or stop it.
+   - A container created when `sb` still used tmux is refused before it is
+     started, with how to reach an agent that may still run in it; run with
+     `--recreate` to replace it.
+
+   In iTerm, `sb` also sets the window's badge to the agent and project
+   (`shell: <agent>` for `sb shell`) and clears it when the run ends.
 
    Before the run and again after it ends, `sb` checks the project and
    writable `--mount` directories for changed host-executed files (see
@@ -227,7 +230,7 @@ home/<agent>/                persisted agent config & credentials (gitignored)
 
 `containers/base/Dockerfile` (Ubuntu 26.04) provides everything the agents share:
 - the unprivileged user `agent` (no sudo)
-- curl, vim, emacs-nox, tmux, fish and git
+- curl, vim, emacs-nox, fish and git
 - python3 with pip and venv (`python` → `python3`), plus node and npm
 - iptables and iproute2, used by `sandbox-init`
 - dbus and gnome-keyring, for agents that keep tokens in a keyring
@@ -283,9 +286,6 @@ Agent Dockerfiles only add the agent itself.
   `containers/base/Dockerfile`.
 - Containers created before the hardening keep their old, permissive settings.
   `sb` refuses to attach to them; fix it with `--recreate`.
-- Containers created before `--init` was added do not reap finished
-  processes, so zombies pile up toward the process limit. Fix it with
-  `--recreate`.
 - Some things the agent does on the host cannot work in the container,
   with or without tmux: pasting an image from the Mac clipboard, dragging
   Mac files in (their paths differ in the container), opening a browser,

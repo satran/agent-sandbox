@@ -67,13 +67,55 @@ EOF
 
 die() { echo "sb: $*" >&2; exit 1; }
 
+# Every run is tagged SB_RUN=<mode>.<host pid of sb>.<random>. Its processes,
+# daemons included, inherit the tag, which is how sb finds them again.
+# Prints the tag of every tagged run in container $1.
+run_tags() {
+	docker exec --user "$CUSER" "$1" sh -c '
+		for p in /proc/[0-9]*; do
+			tr "\0" "\n" 2>/dev/null <"$p/environ" | sed -n "s/^SB_RUN=//p"
+		done' </dev/null 2>/dev/null | sort -u || true
+}
+
+# A run is alive while the sb that started it is.
+run_alive() {
+	local pid="${1#*.}"
+	pid="${pid%%.*}"
+	ps -p "$pid" -o command= 2>/dev/null | grep -qE '(^|[ /])sb( |$)'
+}
+
+# One line per sandbox, with how many agents and shells run in it.
+list() {
+	local n state status project t agents shells
+	printf 'NAME\tSTATUS\tAGENTS\tSHELLS\tPROJECT\n'
+	docker ps -a --filter label=sandbox.agent --format \
+		'{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Label "sandbox.project"}}' |
+		while IFS=$'\t' read -r n state status project; do
+			agents=- shells=-
+			if [[ $state == running ]]; then
+				agents=0 shells=0
+				while IFS= read -r t; do
+					[[ -n "$t" ]] && run_alive "$t" || continue
+					case "$t" in
+						agent.*) agents=$((agents + 1)) ;;
+						shell.*) shells=$((shells + 1)) ;;
+					esac
+				done < <(run_tags "$n")
+			fi
+			printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$status" "$agents" "$shells" "$project"
+		done
+}
+
 if [[ $# -eq 0 ]]; then usage; exit 1; fi
 
 case "$1" in
 	-h|--help) usage; exit 0 ;;
 	list)
-		docker ps -a --filter label=sandbox.agent \
-			--format 'table {{.Names}}\t{{.Status}}\t{{.Label "sandbox.project"}}'
+		if command -v column >/dev/null; then
+			list | column -t -s $'\t'
+		else
+			list
+		fi
 		exit 0 ;;
 esac
 
@@ -308,6 +350,21 @@ if [[ -n "$(container_state)" ]] &&
 	die "$NAME predates the sandbox hardening, run with --recreate"
 fi
 
+# Containers from the tmux days mount a tmux.conf that no longer exists, so
+# docker would start them with an empty directory there, and they may still
+# run an agent in tmux that nobody sees. Checked before they are started.
+if [[ -n "$(container_state)" ]] &&
+	docker container inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$NAME" |
+		grep -qx "$CHOME/.tmux.conf"; then
+	{
+		echo "sb: $NAME was created for tmux, which sb no longer uses."
+		echo "sb: if an agent may still run in it, finish it first with"
+		echo "sb:   docker exec -it --user $CUSER $NAME tmux attach"
+		echo "sb: then run with --recreate."
+	} >&2
+	exit 1
+fi
+
 # Mounts are fixed when the container is created. Without --mount, keep
 # what it has, so the guard still covers those directories.
 if [[ -n "$(container_state)" ]]; then
@@ -355,9 +412,6 @@ case "$(container_state)" in
 			-e HOME="$CHOME" -e USER="$CUSER"
 			-e SANDBOX_HOST="$(hostname -s)" -e SANDBOX_PROJECT="${PROJECT/#"$HOST_HOME"/\~}"
 			-v "$PROJECT:$CPROJECT" -w "$CPROJECT"
-			# Kept so containers created before tmux was dropped still
-			# start; removed together with tmux.conf.
-			-v "$CONTAINERS/tmux.conf:$CHOME/.tmux.conf:ro"
 		)
 		for d in $SB_DNS; do
 			args+=(--dns "$d")
@@ -420,28 +474,7 @@ if ! wait_ready; then
 	die "sandbox $NAME did not come up"
 fi
 
-# Containers from before sb dropped tmux may still run an agent in it, which
-# nobody would see. Make the user deal with it rather than start a second one.
-if docker exec --user "$CUSER" "$NAME" sh -c 'command -v tmux >/dev/null && tmux has-session' 2>/dev/null; then
-	{
-		echo "sb: $NAME still runs a tmux session from an older sb. Finish it with"
-		echo "sb:   docker exec -it --user $CUSER $NAME tmux attach"
-		echo "sb: or stop the container with: sb $AGENT $PROJECT --stop"
-	} >&2
-	exit 1
-fi
-
-# Every run is tagged SB_RUN=<mode>.<host pid of sb>.<random>. Its processes,
-# daemons included, inherit the tag, which is how sb finds them again.
 RUN_ID="$MODE.$$.$RANDOM$RANDOM"
-
-# Prints the tag of every tagged run in the container.
-run_tags() {
-	docker exec --user "$CUSER" "$NAME" sh -c '
-		for p in /proc/[0-9]*; do
-			tr "\0" "\n" 2>/dev/null <"$p/environ" | sed -n "s/^SB_RUN=//p"
-		done' 2>/dev/null | sort -u || true
-}
 
 # Hangs up every process of the given runs, then kills what is left.
 kill_runs() {
@@ -466,13 +499,6 @@ kill_runs() {
 		true' _ "$@"
 }
 
-# A run is alive while the sb that started it is.
-run_alive() {
-	local pid="${1#*.}"
-	pid="${pid%%.*}"
-	ps -p "$pid" -o command= 2>/dev/null | grep -qE '(^|[ /])sb( |$)'
-}
-
 # docker exec does not end its process when the client goes away, so a
 # window closed while sb could not clean up leaves the run behind.
 stale=() agents=0
@@ -483,7 +509,7 @@ while IFS= read -r t; do
 	elif [[ "$t" == agent.* ]]; then
 		agents=$((agents + 1))
 	fi
-done < <(run_tags)
+done < <(run_tags "$NAME")
 if [[ ${#stale[@]} -gt 0 ]]; then
 	echo "sb: stopping ${#stale[@]} run(s) left behind by a closed window" >&2
 	kill_runs "${stale[@]}" || true
@@ -512,13 +538,25 @@ else
 	prep="stty susp undef 2>/dev/null"
 fi
 
+# iTerm shows a badge in the window, so tabs that all run "claude" can be
+# told apart. Written to the host terminal, before and after the run.
+badge() {
+	[[ "${LC_TERMINAL:-}" == iTerm2 || "${TERM_PROGRAM:-}" == iTerm.app ]] || return 0
+	{ printf '\033]1337;SetBadgeFormat=%s\a' "$(printf '%s' "$1" | base64 | tr -d '\n')"; } 2>/dev/null || true
+}
+if [[ $MODE == shell ]]; then
+	badge "shell: $AGENT"$'\n'"$(basename "$PROJECT")"
+else
+	badge "$AGENT"$'\n'"$(basename "$PROJECT")"
+fi
+
 # Changes made while no sb was watching show up here.
 guard_check
 
 # Closing the window hangs up sb and the docker client, but not the run in
 # the container, so end it here. The guard is not re-checked then: nobody
 # would see the warning, and saving the snapshot would hide it for good.
-trap 'kill_runs "$RUN_ID" >/dev/null 2>&1 || true' EXIT
+trap 'kill_runs "$RUN_ID" >/dev/null 2>&1 || true; badge ""' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
