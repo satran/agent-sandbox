@@ -1,6 +1,6 @@
 # agents
 
-Run coding agents (Claude Code, Gemini CLI, …) inside throwaway-but-persistent
+Run coding agents (Claude Code, Antigravity CLI, …) inside throwaway-but-persistent
 docker containers, one per agent and project, so they can run with permissions
 disabled without touching the rest of your machine.
 
@@ -204,7 +204,6 @@ Agent Dockerfiles only add the agent itself.
 |------------|----------------|-----------------------------|
 | `antigravity` | yes         | yes                         |
 | `claude`   | yes            | yes                         |
-| `gemini`   | yes            | yes                         |
 | `omp`      | yes            | yes                         |
 | `opencode` | yes            | yes                         |
 | `sandbox`  | no             | no, plain dev box           |
