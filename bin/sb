@@ -320,6 +320,11 @@ check_file_sharing() {
 			sed -E 's/^[^[]*\[//; s/\]$//' | tr ',' '\n' |
 			sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' |
 			while IFS= read -r d; do
+		# macOS privacy controls can hide another app's data from the terminal.
+		if [[ ! -r "$f" ]]; then
+			echo "sb: can't read Docker Desktop settings (macOS privacy); file sharing not checked." >&2
+			return 0
+		fi
 				[[ -n "$d" ]] || continue
 				d="${d%/}"
 				if [[ "$HOST_HOME" == "$d" || "$HOST_HOME" == "$d"/* || -z "$d" ]]; then
