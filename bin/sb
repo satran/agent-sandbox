@@ -407,14 +407,40 @@ if [[ -n "$(container_state)" ]]; then
 	fi
 fi
 
+# Checksum of a build context's file names and contents.
+src_sum() {
+	(cd "$1" && find . -type f -print | LC_ALL=C sort | while IFS= read -r f; do
+		printf '%s ' "$f"
+		cksum <"$f"
+	done) | cksum | awk '{print $1}'
+}
+
+# Images are labelled with the checksum of their source. A stale image is
+# rebuilt when a container is about to be created from it; a container that
+# already exists keeps its image until --rebuild.
+BASE_SRC="$(src_sum "$CONTAINERS/base")"
+IMAGE_SRC="$BASE_SRC.$(src_sum "$AGENT_DIR")"
+image_src() {
+	docker image inspect -f '{{index .Config.Labels "sandbox.src"}}' "$1" 2>/dev/null || true
+}
+STALE=0
+[[ "$(image_src sandbox-base)" == "$BASE_SRC" && "$(image_src "$IMAGE")" == "$IMAGE_SRC" ]] || STALE=1
+if [[ $STALE -eq 1 && $REBUILD -eq 0 ]]; then
+	if [[ -z "$(container_state)" ]]; then
+		REBUILD=1
+	elif docker image inspect "$IMAGE" >/dev/null 2>&1; then
+		echo "sb: $IMAGE is older than $CONTAINERS, run with --rebuild to update" >&2
+	fi
+fi
+
 if [[ $REBUILD -eq 1 ]] || ! docker image inspect sandbox-base >/dev/null 2>&1; then
 	echo "sb: building sandbox-base" >&2
-	docker build -t sandbox-base "$CONTAINERS/base"
+	docker build --label sandbox.src="$BASE_SRC" -t sandbox-base "$CONTAINERS/base"
 	REBUILD=1
 fi
 if [[ $REBUILD -eq 1 ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	echo "sb: building $IMAGE" >&2
-	docker build -t "$IMAGE" "$AGENT_DIR"
+	docker build --label sandbox.src="$IMAGE_SRC" -t "$IMAGE" "$AGENT_DIR"
 fi
 
 case "$(container_state)" in
@@ -518,8 +544,10 @@ if [[ ${#HOST_PORTS[@]} -gt 0 ]]; then
 		for p; do
 			socat TCP4-LISTEN:"$p",bind=127.0.0.1,reuseaddr,fork \
 				TCP4:host.docker.internal:"$p" </dev/null >/dev/null 2>&1 &
-		done' _ "${HOST_PORTS[@]}" </dev/null ||
-		echo "sb: could not start the host port relays (no socat? run with --rebuild)" >&2
+		done' _ "${HOST_PORTS[@]}" </dev/null || {
+		[[ $? -eq 3 ]] && echo "sb: no socat in $NAME, run with --rebuild" >&2 ||
+			echo "sb: could not start the host port relays" >&2
+	}
 fi
 
 RUN_ID="$MODE.$$.$RANDOM$RANDOM"

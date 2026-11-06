@@ -107,8 +107,7 @@ claude mcp add --transport http mdedit http://127.0.0.1:47821/mcp \
 
 This works with Docker Desktop, which forwards `host.docker.internal` to the
 host's loopback. On Linux, `host.docker.internal` is the docker bridge, so the
-host app must also listen there. The image needs `socat`: run once with
-`--rebuild` if the base image predates it. Read
+host app must also listen there. Read
 [Isolation](#isolation) before you open a port.
 
 ## How it works
@@ -126,8 +125,11 @@ For `sb <agent> <path>`:
    `$HOME` or a parent of it, or anything under this repo's `home/` is
    refused.
 3. **Images.** `sandbox-base` is built from `containers/base`, then
-   `sandbox-<agent>` from `containers/<agent>`. Each is built only if missing,
-   or always with `--rebuild` (the layer cache keeps that fast).
+   `sandbox-<agent>` from `containers/<agent>`. Each is labelled
+   `sandbox.src` with a checksum of its directory. They are built if missing,
+   always with `--rebuild` (the layer cache keeps that fast), and when the
+   checksum changed and a new container is about to be created; an existing
+   container keeps its image and `sb` says to run with `--rebuild`.
 4. **Container.** It is named `sandbox-<agent>-<path-slug>-<6-char sha1 of path>`
    and labelled `sandbox.agent` / `sandbox.project`. It runs `sandbox-init`
    under Docker's `--init` (which reaps finished processes); `sandbox-init`
