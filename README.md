@@ -193,6 +193,7 @@ home/<agent>/                persisted agent config & credentials (gitignored)
 - curl, vim, emacs-nox, tmux, fish and git
 - python3 with pip and venv (`python` → `python3`), plus node and npm
 - iptables and iproute2, used by `sandbox-init`
+- dbus and gnome-keyring, for agents that keep tokens in a keyring
 - `~/.local/bin` on `PATH`
 
 Agent Dockerfiles only add the agent itself.
@@ -201,6 +202,7 @@ Agent Dockerfiles only add the agent itself.
 
 | agent      | `sandbox.conf` | runnable with `bin/sb` |
 |------------|----------------|-----------------------------|
+| `antigravity` | yes         | yes                         |
 | `claude`   | yes            | yes                         |
 | `gemini`   | yes            | yes                         |
 | `omp`      | yes            | yes                         |

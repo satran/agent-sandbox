@@ -1,0 +1,16 @@
+#!/bin/sh
+#
+# agy keeps its login token in the Secret Service keyring and has no file
+# fallback, so give it a D-Bus session and a gnome-keyring to talk to. The
+# keyring has an empty password and lives in the persisted
+# ~/.local/share/keyrings, so the login survives a --recreate.
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+	exec dbus-run-session -- "$0" "$@"
+fi
+
+# Unlocks the login keyring, creating it on first run.
+printf '' | gnome-keyring-daemon --unlock --components=secrets >/dev/null ||
+	echo "agy-start: could not start gnome-keyring" >&2
+
+exec agy "$@"
