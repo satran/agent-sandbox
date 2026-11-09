@@ -12,12 +12,16 @@ ln -s "$PWD/bin/sb" ~/.local/bin/sb
 
 cd ~/src/myproject
 sb claude       # build images if needed, start container, run claude here
-# ... work ...  close the window or quit claude when done
-sb claude -- --continue   # pick the conversation up again
+# ... close the window: claude keeps running
+sb claude       # attaches to it again
+sb claude --new # a second claude in the same project
+sb claude -- --continue   # after claude has ended: pick the conversation up again
 sb shell claude # a bash in the same container, in another tab
 ```
 
-Requirements on the host: `bash`, `docker`, `shasum`.
+Requirements on the host: `bash`, `docker`, `shasum`, and `dtach`
+(`brew install dtach` / `apt install dtach`). Without dtach, agents run
+directly in the terminal and closing the window ends them.
 
 ## Usage
 
@@ -34,11 +38,16 @@ options:
   --mount DIR[:ro]
                also mount DIR, read-write or :ro (repeatable; applied when
                the container is created, so change with --recreate)
+  --new        start another session instead of attaching to the running one
+  --session N  attach to session N, when there are several
+  --direct     run in this terminal without dtach; closing the window ends it
   --stop       stop this project's container
   -h, --help   show this help
 
-Everything after -- is also passed to the agent, unchanged. Closing the
-window ends the agent; resume with its own flag, e.g. sb claude -- --continue.
+Everything after -- is also passed to the agent, unchanged. Agents run under
+dtach on the host: closing the window leaves the agent running and the next
+sb <agent> attaches (detach: ctrl-\). Once it has ended, resume with its own
+flag, e.g. sb claude -- --continue.
 sb shell opens a bash as the agent user in the project instead.
 ```
 
@@ -50,12 +59,23 @@ sb shell opens a bash as the agent user in the project instead.
   It can be repeated; the values are joined in order.
 - Anything after `--` is appended to the agent command unchanged, e.g.
   `sb claude -- --resume`.
-- The agent runs directly in your terminal, with no tmux in between, and
-  closing the window ends it. To carry on, start it again with its resume
-  flag (see the [Agents](#agents) table), e.g. `sb claude -- --continue`.
-  Running `sb` again while the agent is still running starts a second one
-  next to it, as running it twice on the host would; `antigravity` refuses
-  that, because both would use the same keyring.
+- The agent runs in a session under [dtach](https://github.com/crigler/dtach)
+  on the host, so closing the window leaves it running. `sb <agent>` for the
+  same project attaches to that session instead of starting a new one;
+  `ctrl-\` detaches on purpose. Arguments given while attaching are ignored,
+  with a note. dtach keeps no scrollback, so on attach you see the current
+  screen only.
+- `--new` starts another session next to the running ones, as running the
+  agent twice on the host would; `antigravity` refuses that, because both
+  would use the same keyring. With several sessions, `sb <agent>` attaches to
+  the newest and names the others; `--session N` picks one.
+- Sessions end when the agent exits, and with the container: a reboot, a
+  Docker restart, `--stop`, `--recreate` or `--rebuild` (the last two then
+  start a new session). To carry on after that, use the agent's resume flag
+  (see the [Agents](#agents) table), e.g. `sb claude -- --continue`.
+- `--direct` runs the agent straight in your terminal, as `sb` did before
+  dtach: closing the window ends it. Without `dtach` installed, `sb` does
+  this and says so.
 - `sb shell <agent> [path]` opens a bash in the same container, as `agent`,
   in the project. It takes the same options except `--args` and `--`. Do not
   use a plain `docker exec` instead: it runs as root, which can turn the
@@ -148,7 +168,13 @@ For `sb <agent> <path>`:
    With `SB_HOST_PORTS`, the container also gets a `host.docker.internal`
    entry and the ports in `SANDBOX_HOST_PORTS` and the `sandbox.host-ports`
    label.
-5. **Run.** `docker exec -it --user agent` runs `AGENT_CMD` (or bash, for
+5. **Run.** For an agent, `sb` first runs itself again under `dtach` on the
+   host, with the socket in `home/.sb/dtach/<agent>-<hash>.<n>.sock` (the
+   directory is `0700`: whoever can open a socket controls that agent).
+   The `sb` inside is marked with `SB_DTACH_SESSION=<n>` and writes its pid
+   next to the socket, which is how the next `sb` finds live sessions. It
+   then does the rest as below. `--direct` and `sb shell` skip dtach.
+   `docker exec -it --user agent` runs `AGENT_CMD` (or bash, for
    `sb shell`) in the project, attached to your terminal. Only the terminal
    variables listed under [Isolation](#isolation) are passed in. Ctrl-P
    reaches the agent: Docker's detach keys are set to `ctrl-],ctrl-]`.
@@ -168,8 +194,10 @@ For `sb <agent> <path>`:
 
    Before the run and again after it ends, `sb` checks the project and
    writable `--mount` directories for changed host-executed files (see
-   [Isolation](#isolation)). When the window is closed, the second check is
-   skipped, so the warning appears at the next `sb` instead of being lost.
+   [Isolation](#isolation)). Under dtach the second check runs when the agent
+   exits, even if no window is attached, so its warning is also repeated at
+   the next `sb`. With `--direct`, closing the window skips the second check,
+   so the warning appears at the next `sb` instead of being lost.
 
 ## Isolation
 

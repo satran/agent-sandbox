@@ -8,8 +8,8 @@
 #
 # Each (agent, project) pair gets its own long-lived container. The project is
 # mounted at the same path relative to $HOME inside the container, and the
-# agent runs in your terminal via `docker exec`. Closing the window ends it;
-# resume with the agent's own flag, e.g. `sb claude -- --continue`.
+# agent runs via `docker exec`, under dtach on the host: closing the window
+# leaves it running and the next `sb <agent>` attaches to it.
 #
 # Agents are defined by containers/<agent>/{Dockerfile,sandbox.conf}.
 #
@@ -23,7 +23,10 @@ set -euo pipefail
 # progress. The braces make it parse the whole file first; see the end.
 {
 
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+# Kept for re-running sb under dtach.
+SB_ARGV=("$@")
 CONTAINERS="$ROOT/containers"
 CUSER=agent
 CHOME="/home/$CUSER"
@@ -53,11 +56,16 @@ options:
   --mount DIR[:ro]
                also mount DIR, read-write or :ro (repeatable; applied when
                the container is created, so change with --recreate)
+  --new        start another session instead of attaching to the running one
+  --session N  attach to session N, when there are several
+  --direct     run in this terminal without dtach; closing the window ends it
   --stop       stop this project's container
   -h, --help   show this help
 
-Everything after -- is also passed to the agent, unchanged. Closing the
-window ends the agent; resume with its own flag, e.g. sb claude -- --continue.
+Everything after -- is also passed to the agent, unchanged. Agents run under
+dtach on the host: closing the window leaves the agent running and the next
+sb <agent> attaches (detach: ctrl-\\). Once it has ended, resume with its own
+flag, e.g. sb claude -- --continue.
 sb shell opens a bash as the agent user in the project instead.
 
 environment (applied when the container is created):
@@ -83,11 +91,15 @@ run_tags() {
 		done' </dev/null 2>/dev/null | sort -u || true
 }
 
+# True if host pid $1 is an sb.
+sb_alive() {
+	ps -p "$1" -o command= 2>/dev/null | grep -qE '(^|[ /])sb( |$)'
+}
+
 # A run is alive while the sb that started it is.
 run_alive() {
 	local pid="${1#*.}"
-	pid="${pid%%.*}"
-	ps -p "$pid" -o command= 2>/dev/null | grep -qE '(^|[ /])sb( |$)'
+	sb_alive "${pid%%.*}"
 }
 
 # One line per sandbox, with how many agents and shells run in it.
@@ -137,7 +149,7 @@ AGENT_DIR="$CONTAINERS/$AGENT"
 [[ -f "$AGENT_DIR/sandbox.conf" ]] || die "unknown agent '$AGENT' (no $AGENT_DIR/sandbox.conf)"
 
 PROJECT="$PWD"
-REBUILD=0 RECREATE=0 STOP=0
+REBUILD=0 RECREATE=0 STOP=0 NEW=0 DIRECT=0 SESSION=""
 # --args strings are joined and parsed by the shell in the container, so
 # quoting works as on a command line; args after "--" are passed as-is.
 ARGS_STR=""
@@ -149,6 +161,12 @@ while [[ $# -gt 0 ]]; do
 		--rebuild) REBUILD=1 RECREATE=1 ;;
 		--recreate) RECREATE=1 ;;
 		--stop) STOP=1 ;;
+		--new) NEW=1 ;;
+		--direct) DIRECT=1 ;;
+		--session)
+			[[ $# -ge 2 ]] || die "--session needs a number"
+			shift; SESSION="$1" ;;
+		--session=*) SESSION="${1#--session=}" ;;
 		--args)
 			[[ $# -ge 2 ]] || die "--args needs a value"
 			shift; ARGS_STR+=" $1" ;;
@@ -169,6 +187,11 @@ done
 
 [[ $MODE == agent || ( -z "$ARGS_STR" && ${#AGENT_ARGS[@]} -eq 0 ) ]] ||
 	die "sb shell takes no agent arguments"
+[[ $MODE == agent || ( $NEW -eq 0 && $DIRECT -eq 0 && -z "$SESSION" ) ]] ||
+	die "sb shell takes no --new, --session or --direct"
+[[ -z "$SESSION" || "$SESSION" =~ ^[1-9][0-9]*$ ]] || die "--session needs a number"
+[[ -z "$SESSION" || ( $NEW -eq 0 && $DIRECT -eq 0 && $RECREATE -eq 0 ) ]] ||
+	die "--session cannot be combined with --new, --direct, --recreate or --rebuild"
 
 # Per-agent settings. CONFIG_MOUNTS are "host:container" with host relative to
 # the repo root; AGENT_CMD is what sb runs; AGENT_SINGLE_RUN=1 refuses a
@@ -258,6 +281,26 @@ ensure_network() {
 # gitignored, never a project, and hidden from a sandbox working on this repo.
 STATE_DIR="$ROOT/home/.sb"
 
+# dtach sessions of this agent and project: <n>.sock is dtach's socket,
+# <n>.pid the sb running in it. Named by hash, as socket paths are short.
+DTACH_DIR="$STATE_DIR/dtach"
+session_file() { printf '%s/%s-%s.%s.%s\n' "$DTACH_DIR" "$AGENT" "$HASH" "$1" "$2"; }
+
+# Prints the live session numbers, oldest first, and forgets dead ones.
+live_sessions() {
+	local f n
+	for f in "$DTACH_DIR/$AGENT-$HASH".*.pid; do
+		[[ -e "$f" ]] || continue
+		n="${f%.pid}"
+		n="${n##*.}"
+		if [[ -S "$(session_file "$n" sock)" ]] && sb_alive "$(cat "$f")"; then
+			echo "$n"
+		else
+			rm -f "$f" "$(session_file "$n" sock)"
+		fi
+	done | sort -n
+}
+
 # Files in the project that the host runs as code: git hooks and config
 # (core.fsmonitor, core.hooksPath, filters), direnv and VS Code tasks. One
 # "hash<TAB>exec<TAB>link<TAB>path" line each, so any change shows up.
@@ -289,8 +332,9 @@ guard_snapshot() {
 
 # Warn about changes since the last check, then take a new baseline. Warn
 # only: the agent may have had a good reason, but you should know.
+# With "keep", changes found are not saved, so the next check repeats them.
 guard_check() {
-	local snap="$STATE_DIR/$NAME.guard" now changed
+	local snap="$STATE_DIR/$NAME.guard" now changed=""
 	now="$(guard_snapshot || true)"
 	if [[ -f "$snap" ]]; then
 		changed="$(diff "$snap" - <<<"$now" | sed -n 's/^[<>] //p' | cut -f4 | sed '/^$/d' | sort -u || true)"
@@ -302,6 +346,7 @@ guard_check() {
 			} >&2
 		fi
 	fi
+	[[ "${1:-}" != keep || -z "$changed" ]] || return 0
 	mkdir -p "$STATE_DIR"
 	printf '%s\n' "$now" >"$snap"
 }
@@ -357,6 +402,56 @@ if [[ $STOP -eq 1 ]]; then
 fi
 
 [[ -t 0 && -t 1 ]] || die "needs an interactive terminal"
+
+# The agent runs under dtach on the host, so closing the window does not hang
+# up sb and the next sb attaches. The sb inside runs as with --direct.
+if [[ $MODE == agent && $DIRECT -eq 0 && -z "${SB_DTACH_SESSION:-}" ]]; then
+	if ! command -v dtach >/dev/null; then
+		[[ -z "$SESSION" ]] || die "--session needs dtach"
+		echo "sb: dtach not found, running directly (closing the window ends $AGENT)" >&2
+	else
+		mkdir -p "$DTACH_DIR"
+		chmod 700 "$DTACH_DIR"
+		live=()
+		while IFS= read -r n; do live+=("$n"); done < <(live_sessions)
+		running="${live[*]+"${live[*]}"}"
+		if [[ -n "$SESSION" ]]; then
+			[[ " $running " == *" $SESSION "* ]] ||
+				die "no session $SESSION of $AGENT here (running: ${running:-none})"
+			attach=$SESSION
+		elif [[ $NEW -eq 0 && $RECREATE -eq 0 && ${#live[@]} -gt 0 ]]; then
+			attach=${live[${#live[@]}-1]}
+			if [[ ${#live[@]} -gt 1 ]]; then
+				others="${running% *}"
+				echo "sb: attaching to session $attach (also running: $others; sb $AGENT --session N)" >&2
+			fi
+		else
+			attach=""
+		fi
+		if [[ -n "$attach" ]]; then
+			[[ -z "$ARGS_STR" && ${#AGENT_ARGS[@]} -eq 0 ]] ||
+				echo "sb: attaching to the running session; agent arguments are ignored (use --new)" >&2
+			exec dtach -a "$(session_file "$attach" sock)" -r winch
+		fi
+		[[ $AGENT_SINGLE_RUN -eq 0 || $RECREATE -eq 1 || ${#live[@]} -eq 0 ]] ||
+			die "$AGENT is already running here; run sb $AGENT to attach"
+		n=1
+		[[ ${#live[@]} -eq 0 ]] || n=$((live[${#live[@]}-1] + 1))
+		SB_DTACH_SESSION=$n exec dtach -c "$(session_file "$n" sock)" -r winch \
+			"$SELF" ${SB_ARGV[@]+"${SB_ARGV[@]}"}
+	fi
+fi
+
+# Under dtach, record this sb at once, so the next sb finds the session even
+# while this one is still building or starting the container.
+PID_FILE=""
+if [[ -n "${SB_DTACH_SESSION:-}" ]]; then
+	PID_FILE="$(session_file "$SB_DTACH_SESSION" pid)"
+	echo $$ >"$PID_FILE"
+fi
+# shellcheck disable=SC2329 # used in traps
+forget_session() { [[ -z "$PID_FILE" ]] || rm -f "$PID_FILE"; }
+trap forget_session EXIT
 
 if [[ $RECREATE -eq 1 && -n "$(container_state)" ]]; then
 	echo "sb: removing $NAME" >&2
@@ -620,7 +715,7 @@ guard_check
 # Closing the window hangs up sb and the docker client, but not the run in
 # the container, so end it here. The guard is not re-checked then: nobody
 # would see the warning, and saving the snapshot would hide it for good.
-trap 'kill_runs "$RUN_ID" >/dev/null 2>&1 || true' EXIT
+trap 'forget_session; kill_runs "$RUN_ID" >/dev/null 2>&1 || true' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -633,6 +728,7 @@ DOCKER_CLI_HINTS=false docker exec -it --detach-keys 'ctrl-],ctrl-]' \
 	eval "$1"
 	eval "exec $2"' _ "$prep" "$cmd" || rc=$?
 [[ "$(container_state)" == running ]] || echo "sb: $NAME stopped while the $MODE was running" >&2
-guard_check
+# Under dtach nobody may be attached to see a warning; the next sb repeats it.
+if [[ -n "$PID_FILE" ]]; then guard_check keep; else guard_check; fi
 exit "$rc"
 }
