@@ -281,6 +281,8 @@ What this does **not** protect:
 
 `sudo apt-get install` no longer works inside the sandbox. Add the package to
 `containers/base/Dockerfile` and run `sb <agent> --rebuild` instead.
+Python packages go in `containers/base/requirements.txt`, one per line, followed
+by the same `--rebuild`.
 
 ## Layout
 
@@ -298,6 +300,8 @@ home/<agent>/                persisted agent config & credentials (gitignored)
 - the unprivileged user `agent` (no sudo)
 - curl, vim, emacs-nox, fish and git
 - python3 with pip and venv (`python` → `python3`), plus node and npm
+- the Python packages listed in `containers/base/requirements.txt`
+  (currently weasyprint), installed system-wide
 - iptables and iproute2, used by `sandbox-init`
 - dbus and gnome-keyring, for agents that keep tokens in a keyring
 - `~/.local/bin` on `PATH`

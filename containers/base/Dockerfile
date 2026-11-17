@@ -22,7 +22,17 @@ RUN apt-get update && apt-get install -y \
 	socat \
 	dbus \
 	gnome-keyring \
+	libpango-1.0-0 \
+	libpangoft2-1.0-0 \
+	libharfbuzz-subset0 \
+	fonts-dejavu-core \
 	&& rm -rf /var/lib/apt/lists/*
+
+# Python packages for the user's scripts; edit requirements.txt and rebuild.
+# The pango/harfbuzz/fonts packages above are what weasyprint loads at run time.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r /tmp/requirements.txt \
+	&& rm /tmp/requirements.txt
 
 # Set up a symbolic link for python (so 'python' works instead of 'python3')
 RUN ln -s /usr/bin/python3 /usr/bin/python

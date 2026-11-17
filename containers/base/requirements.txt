@@ -1,0 +1,4 @@
+# Python packages installed system-wide in sandbox-base, one per line.
+# After editing, run `sb <agent> --rebuild`. Native libraries a package
+# needs go in the apt list in the Dockerfile.
+weasyprint
